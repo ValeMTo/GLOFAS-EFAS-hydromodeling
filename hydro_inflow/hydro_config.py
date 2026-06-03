@@ -4,17 +4,10 @@ from pathlib import Path
 import logging
 import os
 
+from hydro_inflow.utils import ensure_directories, get_data_root, get_repo_root
+
 
 logger = logging.getLogger(__name__)
-
-
-def get_repo_root() -> Path:
-    return Path(
-        os.environ.get(
-            "HYDRO_REPO_ROOT",
-            Path(__file__).resolve().parents[2],
-        )
-    )
 
 
 def get_dataset() -> str:
@@ -26,20 +19,6 @@ def get_dataset() -> str:
         )
 
     return dataset
-
-
-def get_data_root() -> Path:
-    return Path(
-        os.environ.get(
-            "HYDRO_DATA_ROOT",
-            get_repo_root() / "data" / "hydro_workflow",
-        )
-    )
-
-
-def ensure_directories(paths: list[Path]) -> None:
-    for path in paths:
-        path.mkdir(parents=True, exist_ok=True)
 
 
 def build_saber_paths(
@@ -77,7 +56,7 @@ def build_saber_paths(
 def get_config() -> dict:
     dataset = get_dataset()
     repo_root = get_repo_root()
-    data_root = get_data_root()
+    data_root = get_data_root(repo_root)
 
     hydro_global_dir = data_root / "hydro_global"
     saber_global_root_dir = data_root / "saber_global"
@@ -110,7 +89,6 @@ def get_config() -> dict:
         "pypsa_inflow_netcdf_dir": pypsa_inflow_netcdf_dir,
         "pypsa_inflow_years": [2015, 2016, 2017, 2018, 2019],
 
-        # ENTSO-E / Electricity Maps hydro production reference
         "entsoe_hydro_years": [2015, 2016, 2017, 2018, 2019],
         "entsoe_hydro_dir": entsoe_hydro_dir,
         "entsoe_hydro_hourly_dir": entsoe_hydro_hourly_dir,

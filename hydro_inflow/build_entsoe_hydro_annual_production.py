@@ -1,30 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+import argparse
 import json
 import logging
-import sys
 
 import numpy as np
 import pandas as pd
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
-
-from scripts.hydro_inflow.hydro_config import get_config
+from hydro_inflow.hydro_config import get_config
+from hydro_inflow.utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
 
 COMPONENTS = ["Pumped", "RoR", "Reservoir"]
 
-# A component is considered usable only if it has enough valid data.
-# This avoids sparse components destroying Reservoir totals.
 MIN_COMPONENT_COVERAGE = 0.50
 MIN_COMPONENT_VALID_HOURS = 24 * 30
-
-# Used later for weekly/monthly resampling.
 MIN_PERIOD_COVERAGE = 0.90
 
 CH_YEARS_WITHOUT_ELECTRICITY_MAPS = [2015, 2016]
@@ -64,12 +57,7 @@ def load_ch_hydro_hourly_mw_from_electricity_maps(
             }
         )
 
-    daily_mw = (
-        pd.DataFrame(records)
-        .set_index("datetime")
-        .sort_index()
-    )
-
+    daily_mw = pd.DataFrame(records).set_index("datetime").sort_index()
     daily_mw = daily_mw[daily_mw.index.year == year]
 
     hourly_index = pd.date_range(
@@ -141,18 +129,6 @@ def build_nopumped_dataset(
     min_component_coverage: float = MIN_COMPONENT_COVERAGE,
     min_component_valid_hours: int = MIN_COMPONENT_VALID_HOURS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Build no-pumped ENTSO-E reference.
-
-    Rules:
-    - CH 2017-2019 uses Electricity Maps CH_Total.
-    - For other countries, use only hydro components with sufficient coverage.
-    - If only RoR is usable, Total = RoR.
-    - If only Reservoir is usable, Total = Reservoir.
-    - If both are usable, Total = RoR + Reservoir.
-    - Sparse components with only isolated values are ignored.
-    """
-
     output = pd.DataFrame(index=df_base.index)
     component_report_rows = []
 
@@ -271,7 +247,7 @@ def build_annual_totals_from_hourly(
     ch_years_without_electricity_maps: list[int],
     min_component_coverage: float = MIN_COMPONENT_COVERAGE,
     min_component_valid_hours: int = MIN_COMPONENT_VALID_HOURS,
-) -> None:
+) -> Path:
     rows = []
     component_reports = []
 
@@ -397,14 +373,27 @@ def build_annual_totals_from_hourly(
         component_report_df.to_csv(report_fn, index=False)
         logger.info("Saved component selection report to %s", report_fn)
 
+    return output_fn
 
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
-    )
 
-    cfg = get_config()
+def build_entsoe_hydro_annual_production(
+    cfg: dict | None = None,
+    overwrite: bool = False,
+) -> Path:
+    cfg = cfg or get_config()
+
+    output_path = Path(cfg["entsoe_hydro_annual_production_path"])
+
+    if output_path.exists() and not overwrite:
+        logger.info(
+            "ENTSO-E annual hydro production CSV already exists, skipping: %s",
+            output_path,
+        )
+        return output_path
+
+    if output_path.exists() and overwrite:
+        logger.info("Overwriting ENTSO-E annual hydro production CSV: %s", output_path)
+        output_path.unlink()
 
     years = [
         int(year)
@@ -419,11 +408,11 @@ def main() -> None:
         for year, path in cfg.get("electricity_maps_ch_files", {}).items()
     }
 
-    build_annual_totals_from_hourly(
+    return build_annual_totals_from_hourly(
         entsoe_hourly_dir=Path(cfg["entsoe_hydro_hourly_dir"]),
         electricity_maps_ch_files=electricity_maps_ch_files,
         years=years,
-        output_fn=Path(cfg["entsoe_hydro_annual_production_path"]),
+        output_fn=output_path,
         ch_years_without_electricity_maps=list(
             cfg.get(
                 "entsoe_ch_years_without_electricity_maps",
@@ -436,6 +425,37 @@ def main() -> None:
         min_component_valid_hours=int(
             cfg.get("entsoe_min_component_valid_hours", MIN_COMPONENT_VALID_HOURS)
         ),
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build annual no-pumped ENTSO-E hydro production totals."
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing annual hydro production CSV.",
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use DEBUG logging.",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(level=log_level)
+
+    build_entsoe_hydro_annual_production(
+        overwrite=args.overwrite,
     )
 
 

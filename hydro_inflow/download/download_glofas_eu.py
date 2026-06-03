@@ -3,16 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import argparse
 import logging
-import os
-import sys
 import zipfile
 
 import cdsapi
 
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-from logging_utils import setup_logging
+from hydro_inflow.utils import get_data_root, setup_logging
 
 
 logger = logging.getLogger(__name__)
@@ -32,17 +27,16 @@ DAYS = [
 ]
 
 
-def get_repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+def parse_years(years_arg: str) -> list[int]:
+    if ":" in years_arg:
+        start, end = years_arg.split(":", maxsplit=1)
+        return list(range(int(start), int(end) + 1))
 
-
-def get_data_root() -> Path:
-    return Path(
-        os.environ.get(
-            "HYDRO_DATA_ROOT",
-            get_repo_root() / "data" / "hydro_workflow",
-        )
-    )
+    return [
+        int(item.strip())
+        for item in years_arg.split(",")
+        if item.strip()
+    ]
 
 
 def extract_single_netcdf(zip_path: Path, output_nc_path: Path) -> None:
@@ -73,13 +67,13 @@ def extract_single_netcdf(zip_path: Path, output_nc_path: Path) -> None:
     logger.debug("Extracted NetCDF: %s", output_nc_path)
 
 
-def download_year(
+def download_glofas_year(
     client: cdsapi.Client,
     year: int,
     out_dir: Path,
-    overwrite: bool,
-    keep_zip: bool,
-) -> None:
+    overwrite: bool = False,
+    keep_zip: bool = False,
+) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     zip_path = out_dir / f"glofas_eu_{year}.zip"
@@ -87,7 +81,7 @@ def download_year(
 
     if nc_path.exists() and not overwrite:
         logger.info("Skipping %s: NetCDF already exists: %s", year, nc_path)
-        return
+        return nc_path
 
     if not zip_path.exists() or overwrite:
         logger.info("Downloading GloFAS %s to %s", year, zip_path)
@@ -109,28 +103,51 @@ def download_year(
     else:
         logger.debug("Using existing ZIP for %s: %s", year, zip_path)
 
-    extract_single_netcdf(zip_path=zip_path, output_nc_path=nc_path)
+    extract_single_netcdf(
+        zip_path=zip_path,
+        output_nc_path=nc_path,
+    )
 
     if not keep_zip:
         zip_path.unlink(missing_ok=True)
         logger.debug("Deleted ZIP: %s", zip_path)
 
-
-def parse_years(years_arg: str) -> list[int]:
-    if ":" in years_arg:
-        start, end = years_arg.split(":", maxsplit=1)
-        return list(range(int(start), int(end) + 1))
-
-    return [
-        int(item.strip())
-        for item in years_arg.split(",")
-        if item.strip()
-    ]
+    return nc_path
 
 
-def main() -> None:
-    setup_logging()
+def download_glofas_eu(
+    years: str = "1980:2025",
+    data_root: Path | None = None,
+    overwrite: bool = False,
+    keep_zip: bool = False,
+) -> list[Path]:
+    data_root = data_root or get_data_root()
+    out_dir = data_root / "glofas_europe"
+    parsed_years = parse_years(years)
 
+    logger.info("HYDRO_DATA_ROOT: %s", data_root)
+    logger.info("GloFAS output directory: %s", out_dir)
+    logger.info("GloFAS years: %s", parsed_years)
+
+    client = cdsapi.Client()
+    output_files: list[Path] = []
+
+    for year in parsed_years:
+        output_file = download_glofas_year(
+            client=client,
+            year=year,
+            out_dir=out_dir,
+            overwrite=overwrite,
+            keep_zip=keep_zip,
+        )
+        output_files.append(output_file)
+
+    logger.info("GloFAS download completed.")
+
+    return output_files
+
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download and extract annual GloFAS Europe NetCDF files."
     )
@@ -153,28 +170,26 @@ def main() -> None:
         help="Keep downloaded ZIP files after extracting NetCDF.",
     )
 
-    args = parser.parse_args()
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use DEBUG logging.",
+    )
 
-    data_root = get_data_root()
-    out_dir = data_root / "glofas_europe"
-    years = parse_years(args.years)
+    return parser.parse_args()
 
-    logger.debug("HYDRO_DATA_ROOT: %s", data_root)
-    logger.debug("GloFAS output directory: %s", out_dir)
-    logger.debug("Years: %s-%s (%s years)", years[0], years[-1], len(years))
 
-    client = cdsapi.Client()
+def main() -> None:
+    args = parse_args()
 
-    for year in years:
-        download_year(
-            client=client,
-            year=year,
-            out_dir=out_dir,
-            overwrite=args.overwrite,
-            keep_zip=args.keep_zip,
-        )
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(level=log_level)
 
-    logger.info("GloFAS download completed.")
+    download_glofas_eu(
+        years=args.years,
+        overwrite=args.overwrite,
+        keep_zip=args.keep_zip,
+    )
 
 
 if __name__ == "__main__":

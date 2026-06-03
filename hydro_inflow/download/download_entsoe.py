@@ -5,7 +5,6 @@ from datetime import datetime
 import argparse
 import logging
 import os
-import sys
 import time
 import xml.etree.ElementTree as ET
 
@@ -14,7 +13,8 @@ import requests
 from dateutil.relativedelta import relativedelta
 from tqdm import tqdm
 
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config
+from hydro_inflow.utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
@@ -65,16 +65,12 @@ PSR_TYPES = {
 }
 
 
-def get_repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 def parse_years(value: str) -> list[int]:
     if ":" in value:
         start, end = value.split(":", maxsplit=1)
         return list(range(int(start), int(end) + 1))
 
-    return [int(value)]
+    return [int(item.strip()) for item in value.split(",") if item.strip()]
 
 
 def strip_ns(tag: str) -> str:
@@ -269,6 +265,86 @@ def download_country_year(
     return wide
 
 
+def download_entsoe_hydro(
+    years: str = "2015:2019",
+    token: str | None = None,
+    output_dir: Path | None = None,
+    sleep_s: float = 0.12,
+    overwrite: bool = False,
+) -> list[Path]:
+    token = token or os.environ.get("ENTSOE_API_TOKEN")
+
+    if not token:
+        raise RuntimeError(
+            "ENTSOE_API_TOKEN is not set. "
+            "Set it with: export ENTSOE_API_TOKEN='<your-token>'"
+        )
+
+    cfg = get_config()
+
+    if output_dir is None:
+        output_dir = Path(cfg["entsoe_hydro_hourly_dir"])
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    parsed_years = parse_years(years)
+    output_files: list[Path] = []
+
+    logger.info("Downloading ENTSO-E hydro production for years: %s", parsed_years)
+    logger.info("Output directory: %s", output_dir)
+
+    for year in tqdm(parsed_years, desc="Years"):
+        output = output_dir / f"Europe_Hydro_{year}.csv"
+
+        if output.exists() and not overwrite:
+            logger.info("Already exists, skipping: %s", output)
+            output_files.append(output)
+            continue
+
+        year_data = pd.DataFrame()
+
+        for country, bidding_zone_code in tqdm(
+            COUNTRIES.items(),
+            desc=f"Countries {year}",
+            leave=False,
+        ):
+            country_data = download_country_year(
+                token=token,
+                country_code=bidding_zone_code,
+                year=year,
+                sleep_s=sleep_s,
+            )
+
+            if country_data.empty:
+                logger.warning("%s %s returned no ENTSO-E hydro data.", country, year)
+                continue
+
+            country_data = country_data.rename(
+                columns={
+                    "Pumped": f"{country}_Pumped",
+                    "RoR": f"{country}_RoR",
+                    "Reservoir": f"{country}_Reservoir",
+                    "Total": f"{country}_Total",
+                }
+            )
+
+            year_data = pd.concat([year_data, country_data], axis=1)
+
+        if year_data.empty:
+            logger.warning("%s produced an empty ENTSO-E hydro dataframe.", year)
+            continue
+
+        year_data = year_data.sort_index()
+        year_data.to_csv(output)
+        output_files.append(output)
+
+        logger.info("Saved %s with shape %s", output, year_data.shape)
+
+    logger.info("ENTSO-E hydro download completed.")
+
+    return output_files
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download hourly hydro generation from ENTSO-E Transparency Platform."
@@ -293,83 +369,26 @@ def parse_args() -> argparse.Namespace:
         help="Overwrite existing yearly ENTSO-E CSV files.",
     )
 
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use DEBUG logging.",
+    )
+
     return parser.parse_args()
 
 
 def main() -> None:
-    setup_logging()
-
     args = parse_args()
 
-    token = os.environ.get("ENTSOE_API_TOKEN")
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(level=log_level)
 
-    if not token:
-        raise RuntimeError(
-            "ENTSOE_API_TOKEN is not set. "
-            "Set it with: export ENTSOE_API_TOKEN='<your-token>'"
-        )
-
-    repo_root = get_repo_root()
-    sys.path.insert(0, str(repo_root))
-
-    from scripts.hydro_inflow.hydro_config import get_config
-
-    cfg = get_config()
-
-    output_dir = Path(cfg["entsoe_hydro_hourly_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    years = parse_years(args.years)
-
-    logger.info("Downloading ENTSO-E hydro production for years: %s", years)
-    logger.info("Output directory: %s", output_dir)
-
-    for year in tqdm(years, desc="Years"):
-        output = output_dir / f"Europe_Hydro_{year}.csv"
-
-        if output.exists() and not args.overwrite:
-            logger.info("Already exists, skipping: %s", output)
-            continue
-
-        year_data = pd.DataFrame()
-
-        for country, bidding_zone_code in tqdm(
-            COUNTRIES.items(),
-            desc=f"Countries {year}",
-            leave=False,
-        ):
-            country_data = download_country_year(
-                token=token,
-                country_code=bidding_zone_code,
-                year=year,
-                sleep_s=args.sleep_s,
-            )
-
-            if country_data.empty:
-                logger.warning("%s %s returned no ENTSO-E hydro data.", country, year)
-                continue
-
-            country_data = country_data.rename(
-                columns={
-                    "Pumped": f"{country}_Pumped",
-                    "RoR": f"{country}_RoR",
-                    "Reservoir": f"{country}_Reservoir",
-                    "Total": f"{country}_Total",
-                }
-            )
-
-            year_data = pd.concat([year_data, country_data], axis=1)
-
-        if year_data.empty:
-            logger.warning("%s produced an empty ENTSO-E hydro dataframe.", year)
-            continue
-
-        year_data = year_data.sort_index()
-        year_data.to_csv(output)
-
-        logger.info("Saved %s with shape %s", output, year_data.shape)
-
-    logger.info("ENTSO-E hydro download completed.")
+    download_entsoe_hydro(
+        years=args.years,
+        sleep_s=args.sleep_s,
+        overwrite=args.overwrite,
+    )
 
 
 if __name__ == "__main__":

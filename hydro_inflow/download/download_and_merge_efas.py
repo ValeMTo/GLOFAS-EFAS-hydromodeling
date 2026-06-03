@@ -1,31 +1,23 @@
 from __future__ import annotations
 
+from pathlib import Path
 import argparse
 import glob
 import logging
 import os
 import shutil
-import sys
 import tempfile
 import zipfile
-from pathlib import Path
 
 import cdsapi
 import pandas as pd
 import xarray as xr
 
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-from logging_utils import setup_logging
+from hydro_inflow.utils import get_data_root, setup_logging
 
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================
-# SETTINGS
-# ============================================================
 
 DATASET = "efas-historical"
 
@@ -35,32 +27,15 @@ LON_MAX = 40.0
 DAYS = [f"{day:02d}" for day in range(1, 32)]
 
 
-# ============================================================
-# PATH HELPERS
-# ============================================================
+def get_efas_output_dir(data_root: Path | None = None) -> Path:
+    if data_root is None:
+        data_root = get_data_root()
 
-def get_repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
-
-
-def get_data_root() -> Path:
-    return Path(
-        os.environ.get(
-            "HYDRO_DATA_ROOT",
-            get_repo_root() / "data" / "hydro_workflow",
-        )
-    )
-
-
-def get_efas_output_dir() -> Path:
-    output_dir = get_data_root() / "efas"
+    output_dir = data_root / "efas"
     output_dir.mkdir(parents=True, exist_ok=True)
+
     return output_dir
 
-
-# ============================================================
-# ARGUMENTS
-# ============================================================
 
 def parse_years(years_arg: str) -> list[int]:
     if ":" in years_arg:
@@ -69,36 +44,6 @@ def parse_years(years_arg: str) -> list[int]:
 
     return [int(item.strip()) for item in years_arg.split(",") if item.strip()]
 
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Download, cut, aggregate and merge EFAS historical discharge files."
-    )
-
-    parser.add_argument(
-        "--years",
-        default="1992:2025",
-        help="Years to process. Use '1992:2025' or '1992,1993,2021'.",
-    )
-
-    parser.add_argument(
-        "--keep-monthly-zips",
-        action="store_true",
-        help="Keep monthly ZIP files after the annual NetCDF has been created.",
-    )
-
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing annual daily NetCDF files.",
-    )
-
-    return parser.parse_args()
-
-
-# ============================================================
-# DOWNLOAD MONTH
-# ============================================================
 
 def download_efas_month(
     client: cdsapi.Client,
@@ -125,23 +70,18 @@ def download_efas_month(
         "download_format": "zip",
     }
 
-    logger.debug("Downloading EFAS %s-%s to %s", year, month_str, output_file)
+    logger.info("Downloading EFAS %s-%s to %s", year, month_str, output_file)
     client.retrieve(DATASET, request).download(str(output_file))
-    logger.debug("Completed EFAS monthly download: %s", output_file)
+    logger.info("Completed EFAS monthly download: %s", output_file)
 
     return output_file
 
-
-# ============================================================
-# DOWNLOAD ONE YEAR
-# ============================================================
 
 def download_efas_year(
     client: cdsapi.Client,
     input_folder: Path,
     year: int,
 ) -> None:
-    
     logger.info("Downloading EFAS year %s", year)
 
     for month in range(1, 13):
@@ -152,10 +92,6 @@ def download_efas_year(
             month=month,
         )
 
-
-# ============================================================
-# OPEN, EXTRACT AND CUT ZIP
-# ============================================================
 
 def open_cut_from_zip(
     zip_path: Path,
@@ -187,12 +123,15 @@ def open_cut_from_zip(
     ds = xr.open_dataset(nc_path)
 
     if "valid_time" not in ds.coords:
+        ds.close()
         raise ValueError(f"'valid_time' coordinate not found in {zip_path}")
 
     if "dis06" not in ds.data_vars:
+        ds.close()
         raise ValueError(f"'dis06' variable not found in {zip_path}")
 
     if "latitude" not in ds.coords or "longitude" not in ds.coords:
+        ds.close()
         raise ValueError(f"'latitude'/'longitude' coordinates not found in {zip_path}")
 
     lat_descending = float(ds["latitude"][0]) > float(ds["latitude"][-1])
@@ -211,17 +150,13 @@ def open_cut_from_zip(
     return ds, ds_cut
 
 
-# ============================================================
-# PROCESS ONE YEAR
-# ============================================================
-
 def process_efas_year(
     input_folder: Path,
     year: int,
 ) -> Path:
-    logger.debug("=" * 60)
-    logger.debug("Processing EFAS year %s", year)
-    logger.debug("=" * 60)
+    logger.info("=" * 60)
+    logger.info("Processing EFAS year %s", year)
+    logger.info("=" * 60)
 
     temp_root = Path(tempfile.mkdtemp(prefix=f"efas_{year}_daily_cut_"))
     temp_nc_dir = temp_root / "extracted_nc"
@@ -240,7 +175,7 @@ def process_efas_year(
             if not current_zip.exists():
                 raise FileNotFoundError(f"Missing current month ZIP: {current_zip}")
 
-            logger.debug("Processing EFAS month %s-%s", year, month_str)
+            logger.info("Processing EFAS month %s-%s", year, month_str)
 
             ds_current, ds_current_cut = open_cut_from_zip(
                 zip_path=current_zip,
@@ -368,10 +303,6 @@ def process_efas_year(
         logger.debug("Temporary EFAS processing directory removed: %s", temp_root)
 
 
-# ============================================================
-# CLEAN MONTHLY ZIP FILES
-# ============================================================
-
 def delete_monthly_zip_files(
     input_folder: Path,
     year: int,
@@ -379,44 +310,43 @@ def delete_monthly_zip_files(
     monthly_zip_pattern = str(input_folder / f"efas_historical_{year}_*.zip")
     monthly_zip_files = sorted(glob.glob(monthly_zip_pattern))
 
-    logger.debug("Deleting monthly EFAS ZIP files for %s.", year)
+    logger.info("Deleting monthly EFAS ZIP files for %s.", year)
 
     for zip_path in monthly_zip_files:
         Path(zip_path).unlink()
         logger.debug("Deleted monthly ZIP: %s", zip_path)
 
 
-# ============================================================
-# MAIN LOOP
-# ============================================================
+def download_and_merge_efas(
+    years: str = "1992:2025",
+    data_root: Path | None = None,
+    keep_monthly_zips: bool = False,
+    overwrite: bool = False,
+) -> list[Path]:
+    data_root = data_root or get_data_root()
+    input_folder = get_efas_output_dir(data_root)
+    parsed_years = parse_years(years)
 
-def main() -> None:
-    setup_logging()
-
-    args = parse_args()
-
-    data_root = get_data_root()
-    input_folder = get_efas_output_dir()
-    years = parse_years(args.years)
-
-    logger.debug("HYDRO_DATA_ROOT: %s", data_root)
-    logger.debug("EFAS output directory: %s", input_folder)
-    logger.debug("Years: %s-%s (%s years)", years[0], years[-1], len(years))
+    logger.info("HYDRO_DATA_ROOT: %s", data_root)
+    logger.info("EFAS output directory: %s", input_folder)
+    logger.info("EFAS years: %s", parsed_years)
 
     client = cdsapi.Client()
+    output_files: list[Path] = []
 
-    for year in years:
+    for year in parsed_years:
         output_file = input_folder / f"efas_historical_{year}_daily_cut.nc"
 
-        if output_file.exists() and not args.overwrite:
+        if output_file.exists() and not overwrite:
             logger.info(
                 "Skipping %s: annual daily file already exists: %s",
                 year,
                 output_file,
             )
+            output_files.append(output_file)
             continue
 
-        if output_file.exists() and args.overwrite:
+        if output_file.exists() and overwrite:
             logger.info("Overwriting existing annual EFAS file: %s", output_file)
             output_file.unlink()
 
@@ -427,16 +357,18 @@ def main() -> None:
                 year=year,
             )
 
-            process_efas_year(
+            produced_file = process_efas_year(
                 input_folder=input_folder,
                 year=year,
             )
 
-            if not args.keep_monthly_zips:
+            if not keep_monthly_zips:
                 delete_monthly_zip_files(
                     input_folder=input_folder,
                     year=year,
                 )
+
+            output_files.append(produced_file)
 
             logger.info("EFAS year %s completed successfully.", year)
 
@@ -449,6 +381,53 @@ def main() -> None:
             raise
 
     logger.info("EFAS download and processing completed.")
+
+    return output_files
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download, cut, aggregate and merge EFAS historical discharge files."
+    )
+
+    parser.add_argument(
+        "--years",
+        default="1992:2025",
+        help="Years to process. Use '1992:2025' or '1992,1993,2021'.",
+    )
+
+    parser.add_argument(
+        "--keep-monthly-zips",
+        action="store_true",
+        help="Keep monthly ZIP files after the annual NetCDF has been created.",
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing annual daily NetCDF files.",
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use DEBUG logging.",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(level=log_level)
+
+    download_and_merge_efas(
+        years=args.years,
+        keep_monthly_zips=args.keep_monthly_zips,
+        overwrite=args.overwrite,
+    )
 
 
 if __name__ == "__main__":

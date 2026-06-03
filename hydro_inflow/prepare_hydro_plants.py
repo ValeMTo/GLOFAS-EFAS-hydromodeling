@@ -3,12 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import argparse
 import logging
-import os
 
 import numpy as np
 import pandas as pd
 
-from logging_utils import setup_logging
+from hydro_inflow.utils import get_data_root, get_repo_root, setup_logging
 
 
 logger = logging.getLogger(__name__)
@@ -45,19 +44,6 @@ PPL_COLUMNS = [
     "source_dataset",
     "source_id",
 ]
-
-
-def get_repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def get_data_root() -> Path:
-    return Path(
-        os.environ.get(
-            "HYDRO_DATA_ROOT",
-            get_repo_root() / "data" / "hydro_workflow",
-        )
-    )
 
 
 def load_and_prepare_glohydrores(input_path: Path) -> pd.DataFrame:
@@ -227,6 +213,7 @@ def apply_manual_glohydrores_corrections(df: pd.DataFrame) -> pd.DataFrame:
 
     return out.loc[~remove_mask].copy()
 
+
 def filter_to_pypsa_countries(df: pd.DataFrame, countries: list[str]) -> pd.DataFrame:
     out = df.copy()
     out["Country"] = out["Country"].astype(str).str.strip().str.upper()
@@ -280,16 +267,8 @@ def fill_hydro_nan_parameters(
             logger.debug("No eligible rows for column: %s", target_col)
             return work
 
-        country_tech_median = (
-            eligible.groupby(["Country", "Technology"])[target_col]
-            .median()
-        )
-
-        tech_median = (
-            eligible.groupby("Technology")[target_col]
-            .median()
-        )
-
+        country_tech_median = eligible.groupby(["Country", "Technology"])[target_col].median()
+        tech_median = eligible.groupby("Technology")[target_col].median()
         global_median = eligible[target_col].median()
 
         missing_mask = subset_mask & work[target_col].isna()
@@ -378,6 +357,50 @@ def fill_hydro_nan_parameters(
     return out
 
 
+def prepare_hydro_plants(
+    input_path: Path | None = None,
+    output_path: Path | None = None,
+    verbose: bool = False,
+) -> Path:
+    repo_root = get_repo_root()
+    data_root = get_data_root(repo_root)
+
+    input_path = input_path or repo_root / "data" / "pypsa" / "GloHydroRes_vs1.csv"
+    output_path = (
+        output_path
+        or data_root / "hydro_global" / "Eur_custom_ppls_GloHydroRes_filled.csv"
+    )
+
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input GloHydroRes file not found: {input_path}")
+
+    logger.info("Reading GloHydroRes source: %s", input_path)
+
+    df = load_and_prepare_glohydrores(input_path=input_path)
+    logger.info("Loaded and converted plants: %s", len(df))
+
+    df = convert_glohydrores_country_to_iso2(df)
+    df = filter_to_pypsa_countries(df, countries=PYPSA_EUR_COUNTRIES)
+    df = apply_manual_glohydrores_corrections(df)
+
+    df = fill_hydro_nan_parameters(
+        glohydro_df=df,
+        verbose=verbose,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    df.index = df["source_id"].astype(str)
+    df.index.name = "plant_index"
+    df.to_csv(output_path, index=True)
+
+    logger.info("Prepared hydropower plant file saved: %s", output_path)
+    logger.info("Rows saved: %s", len(df))
+    logger.info("Columns saved: %s", len(df.columns))
+
+    return output_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Prepare the GloHydroRes hydropower plant table for the hydro workflow."
@@ -387,7 +410,7 @@ def parse_args() -> argparse.Namespace:
         "--input",
         type=Path,
         default=None,
-        help="Input GloHydroRes CSV. Default: data/hydro/GloHydroRes_vs1.csv.",
+        help="Input GloHydroRes CSV. Default: data/pypsa/GloHydroRes_vs1.csv.",
     )
 
     parser.add_argument(
@@ -410,46 +433,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    setup_logging()
-
     args = parse_args()
 
-    repo_root = get_repo_root()
-    data_root = get_data_root()
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(level=log_level)
 
-    input_path = args.input or repo_root / "data" / "hydro" / "GloHydroRes_vs1.csv"
-    output_path = (
-        args.output
-        or data_root / "hydro_global" / "Eur_custom_ppls_GloHydroRes_filled.csv"
-    )
-
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input GloHydroRes file not found: {input_path}")
-
-    logger.info("Reading GloHydroRes source: %s", input_path)
-
-    df = load_and_prepare_glohydrores(input_path=input_path)
-    logger.info("Loaded and converted plants: %s", len(df))
-
-    df = convert_glohydrores_country_to_iso2(df)
-    df = filter_to_pypsa_countries(df, countries=PYPSA_EUR_COUNTRIES)
-    df = apply_manual_glohydrores_corrections(df)
-
-    df = fill_hydro_nan_parameters(
-        glohydro_df=df,
+    prepare_hydro_plants(
+        input_path=args.input,
+        output_path=args.output,
         verbose=args.verbose,
     )
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    df = df.copy()
-    df.index = df["source_id"].astype(str)
-    df.index.name = "plant_index"
-    df.to_csv(output_path, index=True)
-
-    logger.info("Prepared hydropower plant file saved: %s", output_path)
-    logger.info("Rows saved: %s", len(df))
-    logger.info("Columns saved: %s", len(df.columns))
 
 
 if __name__ == "__main__":
