@@ -1,0 +1,4 @@
+[submodule "external/pypsa-eur-hydro"]
+	path = external/pypsa-eur-hydro
+	url = https://github.com/ValeMTo/pypsa-eur-hydro.git
+	branch = glofas-efas-integration

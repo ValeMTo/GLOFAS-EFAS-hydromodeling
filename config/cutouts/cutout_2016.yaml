@@ -1,0 +1,40 @@
+%YAML 1.1
+---
+# yaml-language-server: $schema=./schema.default.json
+
+data:
+  cutout:
+    source: build
+    version: unknown
+
+atlite:
+  default_cutout: "europe-2016-sarah3-era5"
+  nprocesses: 1
+  show_progress: false
+  plot_availability_matrix: false
+
+  cutouts:
+    "europe-2016-sarah3-era5":
+      module: era5
+      x:
+      - -12.0
+      - 42.0
+      y:
+      - 33.0
+      - 72.0
+      dx: 0.3
+      dy: 0.3
+      time:
+      - "2016"
+      - "2016"
+      chunks:
+        time: 500
+      prepare_kwargs:
+        features:
+        - wind
+        - influx
+        - temperature
+        - height
+        - runoff
+        monthly_requests: true
+        tmpdir: ./cutouts_tmp/

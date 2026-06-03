@@ -1,0 +1,2408 @@
+# This script loads hydropower plant locations and links each plant to the most suitable
+# EFAS drainage/grid point. It then extracts the corresponding EFAS discharge time
+# series, producing plant-level hydrological inflow.
+
+from __future__ import annotations
+
+from pathlib import Path
+import logging
+import os
+import pickle
+import time
+
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import xarray as xr
+from scipy.spatial import cKDTree
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
+from matplotlib.colors import LogNorm
+from matplotlib.gridspec import GridSpec
+
+from hydro_config import get_config, log_config_summary
+from logging_utils import setup_logging
+
+
+logger = logging.getLogger(__name__)
+
+CFG = get_config()
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# Europe bounding box
+LON_MIN = CFG["lon_min"]
+LON_MAX = CFG["lon_max"]
+LAT_MIN = CFG["lat_min"]
+LAT_MAX = CFG["lat_max"]
+
+DRAIN_FULL_PATH = CFG["drain_full_path"]
+PLANTS_PATH = CFG["plants_path"]
+RIVER_REFERENCE_PATH = CFG["river_reference_path"]
+
+EFAS_EU_DIR = CFG["hydro_data_dir"]
+EFAS_FILE_TEMPLATE = CFG["hydro_file_template"]
+EFAS_VAR_NAME = CFG["hydro_var_name"]
+YEARS = CFG["years"]
+
+FINAL_MATCHES_OUTPUT_PATH = CFG["final_matches_output_path"]
+SERIES_OUTPUT_PATH = CFG["series_output_path"]
+RIVID_MAP_OUTPUT_PATH = CFG["rivid_map_output_path"]
+ZARR_OUTPUT_PATH = CFG["zarr_output_path"]
+
+DIAGNOSTIC_PLOT_DIR = CFG["base_output_dir"] / "diagnostic_plots"
+MATCH_PLOT_HTML_OUTPUT_PATH = DIAGNOSTIC_PLOT_DIR / (
+    f"hydro_plants_{CFG['dataset']}_matches_drain_network.html"
+)
+
+MAX_DISTANCE_KM = 10.0  # max distance (km) for matching hydro plants to drain nodes
+WINDOW = 3  # number of upstream nodes to check for storage plants point correction
+AREA_JUMP_THRESHOLD = 0.15
+CORR_THRESHOLD = 0.95
+MARGIN_DEG = 0.5  # margin to select river reference bbox around hydro plants, and to select drain nodes for matching
+EFFICIENCY = 0.85  # average turbine efficiency
+K_NEIGH_FALLBACK = 6
+GRID_MATCH_TOLERANCE_DEG = 1e-6
+MIN_RIVER_QMAX_RATIO = 0.2
+
+MAKE_MATCH_PLOT = os.environ.get("HYDRO_MAKE_DIAGNOSTIC_PLOTS", "0") == "1"
+SHOW_CORR_BREAK_PLOTS = os.environ.get("HYDRO_SHOW_PLOTS", "0") == "1"
+DEBUG = os.environ.get("HYDRO_LOG_LEVEL", "INFO").upper() == "DEBUG"
+
+# Paper figures
+PAPER_FIGURES_DIR = CFG["paper_figures_dir"]
+PAPER_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+MAKE_PAPER_FIGURES = os.environ.get("HYDRO_MAKE_PAPER_FIGURES", "1") == "1"
+
+PAPER_ROR_PLANT_INDEX = 4968
+PAPER_STORAGE_PLANT_INDEX = 5556
+
+PAPER_ROR_YEAR = 2019
+PAPER_STORAGE_YEAR = 2021
+
+PAPER_ROR_FIGURE_PATH = PAPER_FIGURES_DIR / "efas_ror_matching_case.png"
+PAPER_STORAGE_FIGURE_PATH = PAPER_FIGURES_DIR / "efas_storage_correction_case.png"
+
+# ============================================================
+# GEOGRAPHIC UTILS
+# ============================================================
+
+def km_to_deg_lat(km: float) -> float:
+    return km / 111.0
+
+
+def km_to_deg_lon(km: float, lat: float) -> float:
+    cos_lat = np.cos(np.deg2rad(lat))
+    if np.isclose(cos_lat, 0.0):
+        return np.inf
+    return km / (111.0 * cos_lat)
+
+
+def approx_dist_km(lon: float, lat: float, lon2, lat2):
+    dlon = lon2 - lon
+    dlat = lat2 - lat
+    dx_km = dlon * 111.0 * np.cos(np.deg2rad(lat))
+    dy_km = dlat * 111.0
+    return np.sqrt(dx_km**2 + dy_km**2)
+
+
+# ============================================================
+# LOADERS
+# ============================================================
+
+def load_hydro_power_plants(
+    plants_path: Path,
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    efficiency: float = 0.85,
+) -> pd.DataFrame:
+    """
+    Load hydro power plants and compute qmax/qmin turbine discharge.
+    """
+    ppls = pd.read_csv(plants_path, index_col=0)
+
+    hydro_ppls = ppls[ppls["Fueltype"] == "Hydro"].copy()
+    hydro_ppls = hydro_ppls[hydro_ppls["Capacity"] != 0].copy()
+    hydro_ppls["Technology"] = hydro_ppls["Technology"].fillna("Run-Of-River")
+
+    logger.info("Hydro plants loaded: %s", len(hydro_ppls))
+
+    hydro_ppls = hydro_ppls[
+        (hydro_ppls["lon"] >= lon_min)
+        & (hydro_ppls["lon"] <= lon_max)
+        & (hydro_ppls["lat"] >= lat_min)
+        & (hydro_ppls["lat"] <= lat_max)
+    ].copy()
+
+    logger.debug("Hydro plants filtered to model domain: %s", len(hydro_ppls))
+
+    median_dam_height_ror = hydro_ppls.loc[
+        hydro_ppls["Technology"] == "Run-Of-River",
+        "DamHeight_m",
+    ].median(skipna=True)
+
+    median_dam_height_res = hydro_ppls.loc[
+        hydro_ppls["Technology"].isin(["Reservoir", "Pumped Storage"]),
+        "DamHeight_m",
+    ].median(skipna=True)
+
+    hydro_ppls["qmax_turb"] = np.where(
+        hydro_ppls["DamHeight_m"].notna(),
+        hydro_ppls["Capacity"]
+        / (9.81 * hydro_ppls["DamHeight_m"] * 1e-3 * efficiency),
+        np.where(
+            hydro_ppls["Technology"] == "Run-Of-River",
+            hydro_ppls["Capacity"]
+            / (9.81 * median_dam_height_ror * 1e-3 * efficiency),
+            hydro_ppls["Capacity"]
+            / (9.81 * median_dam_height_res * 1e-3 * efficiency),
+        ),
+    )
+
+    hydro_ppls["qmin_turb"] = hydro_ppls["qmax_turb"] * 0.2
+
+    logger.debug("Qmax and Qmin extrapolated.")
+
+    return hydro_ppls
+
+
+def build_river_bbox_and_mean(
+    hydro_ppls: pd.DataFrame,
+    river_reference_path: Path,
+    var_name: str,
+    margin_deg: float = 2.0,
+) -> tuple[xr.DataArray, xr.DataArray]:
+    """
+    Build spatial EFAS subset around hydro plants and compute mean discharge.
+    """
+    lat_min = hydro_ppls["lat"].min() - margin_deg
+    lat_max = hydro_ppls["lat"].max() + margin_deg
+    lon_min = hydro_ppls["lon"].min() - margin_deg
+    lon_max = hydro_ppls["lon"].max() + margin_deg
+
+    logger.debug(
+        "River bounding box: lat %.2f -> %.2f | lon %.2f -> %.2f",
+        lat_min,
+        lat_max,
+        lon_min,
+        lon_max,
+    )
+
+    ds = xr.open_dataset(river_reference_path)
+    river = ds[var_name]
+
+    lat_values = river["latitude"].values
+
+    if lat_values[0] > lat_values[-1]:
+        lat_slice = slice(lat_max, lat_min)
+    else:
+        lat_slice = slice(lat_min, lat_max)
+
+    river_bbox = river.sel(
+        latitude=lat_slice,
+        longitude=slice(lon_min, lon_max),
+    )
+
+    logger.debug("River bbox dimensions: %s", dict(river_bbox.sizes))
+
+    time_dim = "valid_time" if "valid_time" in river_bbox.dims else "time"
+
+    river_mean = river_bbox.mean(dim=time_dim)
+    river_mean = river_mean.where(river_mean > 0)
+
+    logger.debug("River mean computed. Shape: %s", river_mean.shape)
+
+    return river_bbox, river_mean
+
+
+def build_storage_plants(hydro_ppls: pd.DataFrame) -> gpd.GeoDataFrame:
+    """
+    Select hydro plants with storage behavior.
+    """
+    plants_with_storage = hydro_ppls[
+        (hydro_ppls["Technology"] != "Run-Of-River")
+        & (hydro_ppls["Capacity"] > 0)
+    ].copy()
+
+    plants_with_storage = gpd.GeoDataFrame(
+        plants_with_storage,
+        geometry=gpd.points_from_xy(
+            plants_with_storage["lon"],
+            plants_with_storage["lat"],
+        ),
+        crs="EPSG:4326",
+    )
+
+    logger.debug("Storage plants: %s", len(plants_with_storage))
+
+    return plants_with_storage
+
+
+def load_drain_table(path: Path) -> pd.DataFrame:
+    df = pd.read_parquet(path)
+
+    required_cols = {
+        "model_id",
+        "downstream_model_id",
+        "upstream_model_ids",
+        "drainage_area",
+        "x",
+        "y",
+    }
+
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns in drain table: {sorted(missing)}")
+
+    df["model_id"] = df["model_id"].astype(str)
+    df["downstream_model_id"] = df["downstream_model_id"].where(
+        df["downstream_model_id"].notna(),
+        None,
+    )
+    df["upstream_model_ids"] = df["upstream_model_ids"].fillna("").astype(str)
+
+    if "HYBAS_ID" in df.columns:
+        df["HYBAS_ID"] = df["HYBAS_ID"].astype(str)
+
+    return df
+
+
+def prepare_plants_gdf(all_hydro_plants: pd.DataFrame) -> gpd.GeoDataFrame:
+    plants = all_hydro_plants.copy()
+
+    if "lon" not in plants.columns or "lat" not in plants.columns:
+        raise ValueError("all_hydro_plants must contain 'lon' and 'lat' columns.")
+
+    plants = plants.dropna(subset=["lon", "lat"])
+
+    return gpd.GeoDataFrame(
+        plants,
+        geometry=gpd.points_from_xy(plants["lon"], plants["lat"]),
+        crs="EPSG:4326",
+    )
+
+
+# ============================================================
+# MATCH PLANTS TO DRAIN / EFAS
+# ============================================================
+
+def build_efas_grid_index(river_mean: xr.DataArray) -> dict:
+    """
+    Build a nearest-neighbour index over the full EFAS grid.
+
+    The global tree is used for fast preselection only. Final distances are
+    recomputed locally for each plant in get_k_nearest_efas_cells().
+    """
+    lats = river_mean.latitude.values
+    lons = river_mean.longitude.values
+
+    lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+    lon_flat = lon_grid.ravel()
+    lat_flat = lat_grid.ravel()
+    river_values = river_mean.values.ravel()
+
+    valid_mask = np.isfinite(lon_flat) & np.isfinite(lat_flat)
+
+    lon_flat = lon_flat[valid_mask]
+    lat_flat = lat_flat[valid_mask]
+    river_values = river_values[valid_mask]
+
+    mean_lat = float(np.mean(lat_flat))
+
+    x_km = lon_flat * 111.0 * np.cos(np.deg2rad(mean_lat))
+    y_km = lat_flat * 111.0
+
+    coords_km = np.column_stack([x_km, y_km])
+    tree = cKDTree(coords_km)
+
+    return {
+        "tree": tree,
+        "lon_flat": lon_flat,
+        "lat_flat": lat_flat,
+        "river_values": river_values,
+        "mean_lat": mean_lat,
+    }
+
+
+def build_drain_grid_lookup(
+    df_drain: pd.DataFrame,
+    tolerance_deg: float = 1e-6,
+) -> dict[tuple[float, float], list[int]]:
+    """
+    Build a lookup from rounded EFAS grid coordinates to drain-table row indices.
+    """
+    decimals = int(max(0, np.ceil(-np.log10(tolerance_deg))))
+
+    lookup = {}
+
+    for idx, row in df_drain.iterrows():
+        key = (
+            round(float(row["x"]), decimals),
+            round(float(row["y"]), decimals),
+        )
+        lookup.setdefault(key, []).append(idx)
+
+    return lookup
+
+
+def get_k_nearest_efas_cells(
+    lon: float,
+    lat: float,
+    efas_grid_index: dict,
+    k_neigh: int,
+) -> pd.DataFrame:
+    """
+    Return the k nearest EFAS grid cells to a plant.
+
+    A global KDTree is used only to preselect nearby cells. Distances are then
+    recomputed locally using the plant latitude because one degree of longitude
+    corresponds to fewer km at higher latitudes.
+    """
+    query_k = max(k_neigh * 5, 30)
+
+    mean_lat = efas_grid_index["mean_lat"]
+
+    x_plant_global = lon * 111.0 * np.cos(np.deg2rad(mean_lat))
+    y_plant_global = lat * 111.0
+
+    _, idxs = efas_grid_index["tree"].query(
+        [x_plant_global, y_plant_global],
+        k=query_k,
+    )
+
+    idxs = np.atleast_1d(idxs)
+
+    lon_candidates = efas_grid_index["lon_flat"][idxs]
+    lat_candidates = efas_grid_index["lat_flat"][idxs]
+
+    dists_km = approx_dist_km(
+        lon=lon,
+        lat=lat,
+        lon2=lon_candidates,
+        lat2=lat_candidates,
+    )
+
+    order = np.argsort(dists_km)[:k_neigh]
+    selected_idxs = idxs[order]
+
+    return pd.DataFrame(
+        {
+            "x": efas_grid_index["lon_flat"][selected_idxs],
+            "y": efas_grid_index["lat_flat"][selected_idxs],
+            "distance_km": dists_km[order],
+            "river_mean": efas_grid_index["river_values"][selected_idxs],
+            "efas_flat_index": selected_idxs,
+        }
+    )
+
+
+def attach_drain_rows_to_efas_cells(
+    efas_cells: pd.DataFrame,
+    df_drain: pd.DataFrame,
+    drain_grid_lookup: dict[tuple[float, float], list[int]],
+    tolerance_deg: float = 1e-6,
+) -> pd.DataFrame:
+    """
+    Keep only EFAS cells that are present in df_drain and attach drain metadata.
+    """
+    decimals = int(max(0, np.ceil(-np.log10(tolerance_deg))))
+
+    rows = []
+
+    for _, cell in efas_cells.iterrows():
+        key = (
+            round(float(cell["x"]), decimals),
+            round(float(cell["y"]), decimals),
+        )
+
+        drain_indices = drain_grid_lookup.get(key, [])
+
+        for drain_idx in drain_indices:
+            drain_row = df_drain.loc[drain_idx].copy()
+
+            out = drain_row.to_dict()
+            out["distance_km"] = float(cell["distance_km"])
+            out["river_mean"] = float(cell["river_mean"])
+            out["efas_flat_index"] = int(cell["efas_flat_index"])
+
+            rows.append(out)
+
+    return pd.DataFrame(rows)
+
+
+def add_river_mean_to_candidates(
+    candidates: pd.DataFrame,
+    river_mean: xr.DataArray,
+    cache: dict[tuple[float, float], float],
+) -> pd.DataFrame:
+    """
+    Attach mean EFAS discharge to drain candidates.
+    """
+    lats = river_mean.latitude.values
+    lons = river_mean.longitude.values
+
+    river_vals = np.empty(len(candidates), dtype=float)
+
+    for j, (_, row) in enumerate(candidates.iterrows()):
+        node_lat = float(row["y"])
+        node_lon = float(row["x"])
+
+        key = (round(node_lat, 5), round(node_lon, 5))
+
+        if key not in cache:
+            lat_idx = np.abs(lats - node_lat).argmin()
+            lon_idx = np.abs(lons - node_lon).argmin()
+
+            cache[key] = float(
+                river_mean.isel(latitude=lat_idx, longitude=lon_idx).values
+            )
+
+        river_vals[j] = cache[key]
+
+    candidates = candidates.copy()
+    candidates["river_mean"] = river_vals
+
+    return candidates
+
+
+def filter_candidates_by_minimum_flow(
+    candidates: pd.DataFrame,
+    qmax: float,
+    min_fraction_of_qmax: float = 0.2,
+) -> pd.DataFrame:
+    """
+    Remove candidates whose mean river discharge is too small compared to qmax.
+
+    The filter is applied only if at least one candidate remains. If it would
+    remove all candidates, the original candidate set is kept.
+    """
+    candidates = candidates.copy()
+
+    if candidates.empty:
+        return candidates
+
+    if not np.isfinite(qmax) or qmax <= 0:
+        return candidates
+
+    if "river_mean" not in candidates.columns:
+        return candidates
+
+    min_allowed_flow = min_fraction_of_qmax * qmax
+
+    filtered = candidates[
+        candidates["river_mean"] >= min_allowed_flow
+    ].copy()
+
+    if len(filtered) >= 1:
+        return filtered
+
+    return candidates
+
+
+def score_candidates(
+    candidates: pd.DataFrame,
+    qmax: float,
+    distance_norm_denominator_km: float,
+    min_fraction_of_qmax: float = 0.2,
+) -> pd.DataFrame:
+    """
+    Score candidates using:
+        0.5 * normalized distance + 0.5 * normalized qmax mismatch.
+
+    Before scoring, candidates with river_mean < min_fraction_of_qmax * qmax
+    are removed, unless this would remove all candidates.
+    """
+    candidates = candidates.copy()
+
+    if candidates.empty:
+        return candidates
+
+    candidates = filter_candidates_by_minimum_flow(
+        candidates=candidates,
+        qmax=qmax,
+        min_fraction_of_qmax=min_fraction_of_qmax,
+    )
+
+    if np.isfinite(qmax):
+        candidates["diff_qmax"] = (candidates["river_mean"] - qmax).abs()
+    else:
+        candidates["diff_qmax"] = 0.0
+
+    candidates["diff_qmax"] = candidates["diff_qmax"].replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+
+    if distance_norm_denominator_km <= 0 or not np.isfinite(distance_norm_denominator_km):
+        candidates["dist_norm"] = 0.0
+    else:
+        candidates["dist_norm"] = candidates["distance_km"] / distance_norm_denominator_km
+
+    candidates["dist_norm"] = candidates["dist_norm"].replace(
+        [np.inf, -np.inf],
+        np.nan,
+    ).fillna(1.0)
+
+    finite_diff = candidates["diff_qmax"].dropna()
+
+    if finite_diff.empty:
+        candidates["diff_norm"] = 0.0
+    else:
+        max_diff = float(finite_diff.max())
+
+        if max_diff == 0 or not np.isfinite(max_diff):
+            candidates["diff_norm"] = 0.0
+        else:
+            candidates["diff_norm"] = candidates["diff_qmax"] / max_diff
+            candidates["diff_norm"] = candidates["diff_norm"].fillna(1.0)
+
+    candidates["combined_score"] = (
+        0.5 * candidates["dist_norm"]
+        + 0.5 * candidates["diff_norm"]
+    )
+
+    candidates["combined_score"] = candidates["combined_score"].replace(
+        [np.inf, -np.inf],
+        np.nan,
+    ).fillna(1.0)
+
+    return candidates
+
+
+def make_match_row(
+    plant_id,
+    best: pd.Series,
+    match_type: str,
+) -> dict:
+    """
+    Build one standardized match row.
+    """
+    matched_river_mean = float(best["river_mean"])
+
+    return {
+        "plant_index": plant_id,
+        "model_id": (
+            str(best["model_id"])
+            if "model_id" in best and pd.notna(best["model_id"])
+            else None
+        ),
+        "HYBAS_ID": (
+            str(best["HYBAS_ID"])
+            if "HYBAS_ID" in best and pd.notna(best["HYBAS_ID"])
+            else None
+        ),
+        "cluster": (
+            int(best["cluster"])
+            if "cluster" in best and pd.notna(best["cluster"])
+            else None
+        ),
+        "node": (
+            int(best["node"])
+            if "node" in best and pd.notna(best["node"])
+            else None
+        ),
+        "matched_lon": float(best["x"]),
+        "matched_lat": float(best["y"]),
+        "distance_km": float(best["distance_km"]),
+        "diff_qmax": (
+            float(best["diff_qmax"])
+            if "diff_qmax" in best and pd.notna(best["diff_qmax"])
+            else np.nan
+        ),
+        "combined_score": (
+            float(best["combined_score"])
+            if "combined_score" in best and pd.notna(best["combined_score"])
+            else np.nan
+        ),
+        "river_mean": matched_river_mean,
+        "match_type": match_type,
+    }
+
+
+def get_drain_candidates_within_radius(
+    lon: float,
+    lat: float,
+    df_drain: pd.DataFrame,
+    river_mean: xr.DataArray,
+    river_mean_cache: dict,
+    max_distance_km: float,
+) -> pd.DataFrame:
+    """
+    Search df_drain candidates within max_distance_km.
+    """
+    buf_lon = km_to_deg_lon(max_distance_km, lat)
+    buf_lat = km_to_deg_lat(max_distance_km)
+
+    bbox_candidates = df_drain[
+        (df_drain["x"] >= lon - buf_lon)
+        & (df_drain["x"] <= lon + buf_lon)
+        & (df_drain["y"] >= lat - buf_lat)
+        & (df_drain["y"] <= lat + buf_lat)
+    ].copy()
+
+    if bbox_candidates.empty:
+        return pd.DataFrame()
+
+    bbox_candidates["distance_km"] = approx_dist_km(
+        lon=lon,
+        lat=lat,
+        lon2=bbox_candidates["x"].to_numpy(dtype=float),
+        lat2=bbox_candidates["y"].to_numpy(dtype=float),
+    )
+
+    candidates = bbox_candidates[
+        bbox_candidates["distance_km"] <= max_distance_km
+    ].copy()
+
+    if candidates.empty:
+        return pd.DataFrame()
+
+    candidates = add_river_mean_to_candidates(
+        candidates=candidates,
+        river_mean=river_mean,
+        cache=river_mean_cache,
+    )
+
+    return candidates
+
+
+def match_plants_to_drain(
+    plants_gdf: gpd.GeoDataFrame,
+    df_drain: pd.DataFrame,
+    river_mean: xr.DataArray,
+    max_distance_km: float,
+    k_neigh: int,
+) -> pd.DataFrame:
+    """
+    Match hydro plants with the following priority order:
+
+    1. Take the k nearest EFAS grid cells.
+       If any belongs to df_drain, select the best drain cell among them.
+
+    2. If no drain cell is present among the k nearest EFAS cells,
+       search all drain nodes within max_distance_km and select the best.
+
+    3. If no drain node exists within max_distance_km,
+       fall back to the k nearest EFAS cells, even if they are not in df_drain.
+
+    All selections use:
+        0.5 * normalized distance + 0.5 * normalized qmax mismatch.
+
+    Before scoring, candidates with river_mean < 0.2 * qmax are removed,
+    unless this would remove all candidates.
+    """
+    logger.debug("Total plants to match: %s", len(plants_gdf))
+    logger.debug("Drain nodes available: %s", len(df_drain))
+    logger.debug("K nearest hydrological cells: %s", k_neigh)
+    logger.debug("Drain radius fallback: %.1f km", max_distance_km)
+
+    matched_info = []
+    river_mean_cache = {}
+
+    efas_grid_index = build_efas_grid_index(river_mean)
+    drain_grid_lookup = build_drain_grid_lookup(
+        df_drain=df_drain,
+        tolerance_deg=GRID_MATCH_TOLERANCE_DEG,
+    )
+
+    nan_riverflow_count = 0
+    low_riverflow_count = 0
+
+    match_type_counts = {
+        "drain_k_nearest": 0,
+        "drain_radius": 0,
+        "fallback_nn_efas": 0,
+        "unmatched": 0,
+    }
+
+    for plant_idx, plant in plants_gdf.iterrows():
+        plant_id = plant_idx
+        lon = float(plant.geometry.x)
+        lat = float(plant.geometry.y)
+
+        qmax = (
+            float(plant["qmax_turb"])
+            if "qmax_turb" in plant and pd.notna(plant["qmax_turb"])
+            else np.nan
+        )
+
+        nearest_efas = get_k_nearest_efas_cells(
+            lon=lon,
+            lat=lat,
+            efas_grid_index=efas_grid_index,
+            k_neigh=k_neigh,
+        )
+
+        nearest_drain_candidates = attach_drain_rows_to_efas_cells(
+            efas_cells=nearest_efas,
+            df_drain=df_drain,
+            drain_grid_lookup=drain_grid_lookup,
+            tolerance_deg=GRID_MATCH_TOLERANCE_DEG,
+        )
+
+        if not nearest_drain_candidates.empty:
+            candidates = score_candidates(
+                candidates=nearest_drain_candidates,
+                qmax=qmax,
+                distance_norm_denominator_km=max(
+                    float(nearest_drain_candidates["distance_km"].max()),
+                    1e-12,
+                ),
+                min_fraction_of_qmax=MIN_RIVER_QMAX_RATIO,
+            )
+
+            best = candidates.loc[candidates["combined_score"].idxmin()]
+            match_type = "drain_k_nearest"
+
+        else:
+            radius_candidates = get_drain_candidates_within_radius(
+                lon=lon,
+                lat=lat,
+                df_drain=df_drain,
+                river_mean=river_mean,
+                river_mean_cache=river_mean_cache,
+                max_distance_km=max_distance_km,
+            )
+
+            if not radius_candidates.empty:
+                candidates = score_candidates(
+                    candidates=radius_candidates,
+                    qmax=qmax,
+                    distance_norm_denominator_km=max_distance_km,
+                    min_fraction_of_qmax=MIN_RIVER_QMAX_RATIO,
+                )
+
+                best = candidates.loc[candidates["combined_score"].idxmin()]
+                match_type = "drain_radius"
+
+            else:
+                fallback_candidates = nearest_efas.copy()
+                fallback_candidates["model_id"] = None
+                fallback_candidates["HYBAS_ID"] = None
+                fallback_candidates["cluster"] = None
+                fallback_candidates["node"] = None
+
+                candidates = score_candidates(
+                    candidates=fallback_candidates,
+                    qmax=qmax,
+                    distance_norm_denominator_km=max(
+                        float(fallback_candidates["distance_km"].max()),
+                        1e-12,
+                    ),
+                    min_fraction_of_qmax=MIN_RIVER_QMAX_RATIO,
+                )
+
+                if candidates.empty:
+                    match_type_counts["unmatched"] += 1
+                    continue
+
+                best = candidates.loc[candidates["combined_score"].idxmin()]
+                match_type = "fallback_nn_efas"
+
+        row = make_match_row(
+            plant_id=plant_id,
+            best=best,
+            match_type=match_type,
+        )
+
+        matched_river_mean = row["river_mean"]
+
+        if pd.isna(matched_river_mean):
+            nan_riverflow_count += 1
+        elif matched_river_mean < 0.1:
+            low_riverflow_count += 1
+
+        matched_info.append(row)
+        match_type_counts[match_type] += 1
+
+    matched_df = pd.DataFrame(matched_info)
+
+    logger.debug("Matching completed.")
+    logger.debug("Matched plants: %s", len(matched_df))
+    logger.debug("Matched points with river_mean NaN: %s", nan_riverflow_count)
+    logger.debug("Matched points with river_mean < 0.1: %s", low_riverflow_count)
+    logger.debug("Match type counts: %s", match_type_counts)
+
+    return matched_df
+
+def plot_efas_ror_paper_case(
+    plant_index,
+    hydro_ppls: pd.DataFrame,
+    df_drain: pd.DataFrame,
+    river_mean: xr.DataArray,
+    efas_dir: Path,
+    var_name: str,
+    file_template: str,
+    year: int,
+    output_path: Path,
+    k_neigh: int,
+    max_distance_km: float,
+    min_river_qmax_ratio: float,
+    context_km: float = 10.0,
+    marker_offset_km: float = 0.6,
+) -> None:
+    """
+    Create the paper figure showing one Run-Of-River matching case.
+
+    The figure compares:
+    - nearest candidate by distance
+    - selected point after the qmax-aware scoring
+    - discharge time series at both points
+    """
+    if plant_index not in hydro_ppls.index:
+        logger.warning("RoR paper figure skipped. Plant index not found: %s", plant_index)
+        return
+
+    plant = hydro_ppls.loc[plant_index]
+
+    if str(plant.get("Technology", "")) != "Run-Of-River":
+        logger.warning(
+            "RoR paper figure plant is not Run-Of-River: %s | Technology=%s",
+            plant_index,
+            plant.get("Technology", None),
+        )
+
+    plant_lon = float(plant["lon"])
+    plant_lat = float(plant["lat"])
+    qmax = float(plant["qmax_turb"])
+
+    efas_grid_index = build_efas_grid_index(river_mean)
+    drain_grid_lookup = build_drain_grid_lookup(
+        df_drain=df_drain,
+        tolerance_deg=GRID_MATCH_TOLERANCE_DEG,
+    )
+
+    nearest_efas = get_k_nearest_efas_cells(
+        lon=plant_lon,
+        lat=plant_lat,
+        efas_grid_index=efas_grid_index,
+        k_neigh=k_neigh,
+    )
+
+    nearest_drain_candidates = attach_drain_rows_to_efas_cells(
+        efas_cells=nearest_efas,
+        df_drain=df_drain,
+        drain_grid_lookup=drain_grid_lookup,
+        tolerance_deg=GRID_MATCH_TOLERANCE_DEG,
+    )
+
+    if not nearest_drain_candidates.empty:
+        candidates = score_candidates(
+            candidates=nearest_drain_candidates,
+            qmax=qmax,
+            distance_norm_denominator_km=max(
+                float(nearest_drain_candidates["distance_km"].max()),
+                1e-12,
+            ),
+            min_fraction_of_qmax=min_river_qmax_ratio,
+        )
+        match_type = "drain_k_nearest"
+    else:
+        river_mean_cache = {}
+
+        radius_candidates = get_drain_candidates_within_radius(
+            lon=plant_lon,
+            lat=plant_lat,
+            df_drain=df_drain,
+            river_mean=river_mean,
+            river_mean_cache=river_mean_cache,
+            max_distance_km=max_distance_km,
+        )
+
+        if not radius_candidates.empty:
+            candidates = score_candidates(
+                candidates=radius_candidates,
+                qmax=qmax,
+                distance_norm_denominator_km=max_distance_km,
+                min_fraction_of_qmax=min_river_qmax_ratio,
+            )
+            match_type = "drain_radius"
+        else:
+            candidates = nearest_efas.copy()
+            candidates["model_id"] = None
+            candidates["HYBAS_ID"] = None
+            candidates["cluster"] = None
+            candidates["node"] = None
+            candidates["drainage_area"] = np.nan
+
+            candidates = score_candidates(
+                candidates=candidates,
+                qmax=qmax,
+                distance_norm_denominator_km=max(
+                    float(candidates["distance_km"].max()),
+                    1e-12,
+                ),
+                min_fraction_of_qmax=min_river_qmax_ratio,
+            )
+            match_type = "fallback_nn_efas"
+
+    if candidates.empty:
+        logger.warning("RoR paper figure skipped. No candidates found for plant %s.", plant_index)
+        return
+
+    selected = candidates.loc[candidates["combined_score"].idxmin()]
+    nearest = candidates.loc[candidates["distance_km"].idxmin()]
+
+    nc_path = efas_dir / file_template.format(year=year)
+
+    with xr.open_dataset(nc_path) as ds:
+        river = ds[var_name]
+
+        s_nearest = river.sel(
+            longitude=float(nearest["x"]),
+            latitude=float(nearest["y"]),
+            method="nearest",
+        ).load().to_series()
+
+        s_selected = river.sel(
+            longitude=float(selected["x"]),
+            latitude=float(selected["y"]),
+            method="nearest",
+        ).load().to_series()
+
+    s_nearest.index = pd.to_datetime(s_nearest.index)
+    s_selected.index = pd.to_datetime(s_selected.index)
+
+    buf_lon = km_to_deg_lon(context_km, plant_lat)
+    buf_lat = km_to_deg_lat(context_km)
+
+    drain_context = df_drain[
+        (df_drain["x"] >= plant_lon - buf_lon)
+        & (df_drain["x"] <= plant_lon + buf_lon)
+        & (df_drain["y"] >= plant_lat - buf_lat)
+        & (df_drain["y"] <= plant_lat + buf_lat)
+    ].copy()
+
+    if not drain_context.empty:
+        drain_context["distance_km"] = approx_dist_km(
+            lon=plant_lon,
+            lat=plant_lat,
+            lon2=drain_context["x"].to_numpy(dtype=float),
+            lat2=drain_context["y"].to_numpy(dtype=float),
+        )
+        drain_context = drain_context[drain_context["distance_km"] <= context_km].copy()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(15, 6), facecolor="white")
+    gs = GridSpec(1, 2, width_ratios=[1.0, 1.2], figure=fig)
+
+    ax_map = fig.add_subplot(gs[0, 0])
+    ax_ts = fig.add_subplot(gs[0, 1])
+
+    if not drain_context.empty:
+        areas = drain_context["drainage_area"].to_numpy(dtype=float)
+        areas = areas[np.isfinite(areas) & (areas > 0)]
+
+        if len(areas) > 0:
+            norm = LogNorm(vmin=areas.min(), vmax=areas.max())
+
+            sc = ax_map.scatter(
+                drain_context["x"],
+                drain_context["y"],
+                c=drain_context["drainage_area"],
+                cmap="viridis",
+                norm=norm,
+                s=180,
+                edgecolor="none",
+                alpha=0.85,
+                label="Drain nodes",
+                zorder=1,
+            )
+
+            cbar = fig.colorbar(sc, ax=ax_map, fraction=0.046, pad=0.02)
+            cbar.set_label("Drainage area (km²)", fontsize=12)
+            cbar.ax.tick_params(labelsize=11)
+
+    ax_map.scatter(
+        float(nearest["x"]),
+        float(nearest["y"]),
+        marker="o",
+        s=420,
+        facecolor="none",
+        edgecolor="black",
+        linewidth=2.3,
+        label="Nearest candidate",
+        zorder=5,
+    )
+
+    ax_map.scatter(
+        plant_lon,
+        plant_lat,
+        marker="^",
+        s=320,
+        c="green",
+        edgecolor="black",
+        linewidth=0.8,
+        alpha=0.9,
+        label="Hydropower plant",
+        zorder=6,
+    )
+
+    dy = km_to_deg_lat(marker_offset_km)
+    selected_x = float(selected["x"])
+    selected_y = float(selected["y"])
+
+    ax_map.plot(
+        [selected_x, selected_x],
+        [selected_y, selected_y + dy],
+        color="red",
+        linewidth=1.4,
+        zorder=6,
+    )
+
+    ax_map.scatter(
+        selected_x,
+        selected_y + dy,
+        marker="v",
+        s=320,
+        c="red",
+        edgecolor="black",
+        linewidth=0.8,
+        alpha=0.9,
+        label="Selected point",
+        zorder=7,
+    )
+
+    all_x_parts = [np.array([plant_lon, float(nearest["x"]), selected_x])]
+    all_y_parts = [np.array([plant_lat, float(nearest["y"]), selected_y, selected_y + dy])]
+
+    if not drain_context.empty:
+        all_x_parts.append(drain_context["x"].to_numpy(dtype=float))
+        all_y_parts.append(drain_context["y"].to_numpy(dtype=float))
+
+    all_x = np.concatenate(all_x_parts)
+    all_y = np.concatenate(all_y_parts)
+
+    pad_x = max(
+        (all_x.max() - all_x.min()) * 0.08,
+        km_to_deg_lon(context_km * 0.08, plant_lat),
+    )
+    pad_y = max(
+        (all_y.max() - all_y.min()) * 0.08,
+        km_to_deg_lat(context_km * 0.08),
+    )
+
+    ax_map.set_xlim(all_x.min() - pad_x, all_x.max() + pad_x)
+    ax_map.set_ylim(all_y.min() - pad_y, all_y.max() + pad_y)
+
+    ax_map.set_title(
+        f"RoR matching case: {plant.get('Name', plant_index)}",
+        fontsize=13,
+    )
+    ax_map.set_xlabel("Longitude", fontsize=12)
+    ax_map.set_ylabel("Latitude", fontsize=12)
+    ax_map.grid(True, alpha=0.3)
+    ax_map.legend(loc="best", fontsize=10, markerscale=0.7)
+
+    ax_ts.plot(
+        s_nearest.index,
+        s_nearest.values,
+        c="green",
+        label=f"Nearest candidate ({float(nearest['river_mean']):.1f} m³/s mean)",
+        linewidth=1.5,
+    )
+
+    ax_ts.plot(
+        s_selected.index,
+        s_selected.values,
+        c="red",
+        label=f"Selected point ({float(selected['river_mean']):.1f} m³/s mean)",
+        linewidth=1.5,
+    )
+
+    ax_ts.axhline(
+        qmax,
+        linestyle="--",
+        linewidth=1.4,
+        label=f"Plant estimated qmax ({qmax:.1f} m³/s)",
+    )
+
+    ax_ts.set_yscale("log")
+    ax_ts.set_title(
+        f"EFAS discharge time series, {year}\nmatch_type={match_type}",
+        fontsize=13,
+    )
+    ax_ts.set_ylabel("River discharge (m³/s) [log scale]", fontsize=12)
+    ax_ts.grid(True, alpha=0.3, which="both")
+    ax_ts.legend(fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    logger.info("EFAS RoR paper figure saved: %s", output_path)
+
+
+# ============================================================
+# STORAGE CORRECTION
+# ============================================================
+
+def compute_corr(s1: pd.Series, s2: pd.Series) -> float:
+    df = pd.concat([s1, s2], axis=1).dropna()
+    if len(df) < 10:
+        return np.nan
+    return float(np.corrcoef(df.iloc[:, 0], df.iloc[:, 1])[0, 1])
+
+
+def parse_upstream_ids(value) -> list[str]:
+    if pd.isna(value) or str(value).strip() == "":
+        return []
+    return [x for x in str(value).split(";") if x]
+
+
+def choose_prev_by_area_similarity(
+    current_id: str,
+    prev_candidates: list[str],
+    drain_by_id: pd.DataFrame,
+) -> str | None:
+    curr_area = float(drain_by_id.loc[current_id, "drainage_area"])
+
+    best_prev = None
+    best_diff = np.inf
+
+    for prev_id in prev_candidates:
+        if prev_id not in drain_by_id.index:
+            continue
+
+        prev_area = float(drain_by_id.loc[prev_id, "drainage_area"])
+        diff = abs(prev_area - curr_area) / curr_area
+
+        if diff < best_diff:
+            best_diff = diff
+            best_prev = prev_id
+
+    return best_prev
+
+
+def plot_corr_break(
+    s1: pd.Series,
+    s2: pd.Series,
+    n1: str,
+    n2: str,
+    corr: float,
+    plant_name,
+):
+    df = pd.concat(
+        [s1, s2],
+        axis=1,
+        keys=[f"node_{n1}", f"node_{n2}"],
+    ).dropna()
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(df.index, df.iloc[:, 0], label=f"node {n1}", linewidth=2)
+    plt.plot(df.index, df.iloc[:, 1], label=f"node {n2}", linewidth=2, linestyle="--")
+    plt.title(f"Worst hydrological break\n{plant_name}\ncorr = {corr:.3f}")
+    plt.xlabel("Time")
+    plt.ylabel("Discharge")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def choose_best_node_by_global_corr(
+    node_chain: list[str],
+    node_to_series: dict[str, pd.Series],
+    corr_threshold: float,
+    plant_index,
+    do_plot: bool = True,
+    verbose: bool = False,
+) -> tuple[str, bool]:
+    corr_list = []
+
+    for i in range(len(node_chain) - 1):
+        n1 = node_chain[i]
+        n2 = node_chain[i + 1]
+
+        s1 = node_to_series.get(n1)
+        s2 = node_to_series.get(n2)
+
+        if s1 is None or s2 is None:
+            continue
+
+        corr = compute_corr(s1, s2)
+
+        if verbose:
+            logger.debug("corr %s -> %s = %.3f", n1, n2, corr)
+
+        if np.isfinite(corr):
+            corr_list.append((corr, n1, n2))
+
+    if len(corr_list) == 0:
+        return node_chain[len(node_chain) // 2], False
+
+    corr_min, n1_min, n2_min = min(corr_list, key=lambda x: x[0])
+
+    if corr_min < corr_threshold:
+        if do_plot:
+            plot_corr_break(
+                node_to_series[n1_min],
+                node_to_series[n2_min],
+                n1_min,
+                n2_min,
+                corr_min,
+                plant_index,
+            )
+
+        return n1_min, True
+
+    return node_chain[len(node_chain) // 2], False
+
+
+def correct_storage_matches(
+    matched_df: pd.DataFrame,
+    df_drain: pd.DataFrame,
+    river_bbox: xr.DataArray,
+    storage_plant_indices: set,
+    window: int,
+    area_jump_threshold: float,
+    corr_threshold: float,
+    do_plot: bool = False,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    if matched_df.empty:
+        return matched_df
+
+    corrected = matched_df.copy()
+    corrected["correction_status"] = "original"
+
+    drain_by_id = df_drain.set_index("model_id", drop=False)
+
+    n_updated = 0
+
+    for idx, match in corrected.iterrows():
+        plant_index = match["plant_index"]
+
+        if plant_index not in storage_plant_indices:
+            continue
+
+        model_id = match.get("model_id")
+
+        if pd.isna(model_id) or model_id not in drain_by_id.index:
+            continue
+
+        center_id = str(model_id)
+        node_chain = [center_id]
+
+        current_id = center_id
+        current_area = float(drain_by_id.loc[current_id, "drainage_area"])
+
+        for _ in range(window):
+            prev_ids = parse_upstream_ids(
+                drain_by_id.loc[current_id, "upstream_model_ids"]
+            )
+
+            if not prev_ids:
+                break
+
+            prev_id = choose_prev_by_area_similarity(
+                current_id=current_id,
+                prev_candidates=prev_ids,
+                drain_by_id=drain_by_id,
+            )
+
+            if prev_id is None:
+                break
+
+            prev_area = float(drain_by_id.loc[prev_id, "drainage_area"])
+
+            if abs(prev_area - current_area) / current_area > area_jump_threshold:
+                break
+
+            node_chain.insert(0, prev_id)
+            current_id = prev_id
+            current_area = prev_area
+
+        current_id = center_id
+        current_area = float(drain_by_id.loc[current_id, "drainage_area"])
+
+        for _ in range(window):
+            succ_id = drain_by_id.loc[current_id, "downstream_model_id"]
+
+            if pd.isna(succ_id) or succ_id is None:
+                break
+
+            succ_id = str(succ_id)
+
+            if succ_id not in drain_by_id.index:
+                break
+
+            succ_area = float(drain_by_id.loc[succ_id, "drainage_area"])
+
+            if abs(succ_area - current_area) / current_area > area_jump_threshold:
+                break
+
+            node_chain.append(succ_id)
+            current_id = succ_id
+            current_area = succ_area
+
+        node_to_series = {}
+
+        for node_id in node_chain:
+            row = drain_by_id.loc[node_id]
+
+            da = river_bbox.sel(
+                longitude=float(row["x"]),
+                latitude=float(row["y"]),
+                method="nearest",
+            )
+
+            node_to_series[node_id] = da.to_series()
+
+        final_node_id, break_detected = choose_best_node_by_global_corr(
+            node_chain=node_chain,
+            node_to_series=node_to_series,
+            corr_threshold=corr_threshold,
+            plant_index=plant_index,
+            do_plot=do_plot,
+            verbose=verbose,
+        )
+
+        if break_detected:
+            best_row = drain_by_id.loc[final_node_id]
+
+            corrected.loc[idx, "model_id"] = final_node_id
+            corrected.loc[idx, "matched_lon"] = float(best_row["x"])
+            corrected.loc[idx, "matched_lat"] = float(best_row["y"])
+            corrected.loc[idx, "distance_km"] = np.nan
+            corrected.loc[idx, "diff_qmax"] = np.nan
+            corrected.loc[idx, "combined_score"] = np.nan
+            corrected.loc[idx, "correction_status"] = "updated_storage"
+            corrected.loc[idx, "match_type"] = "drain_storage_corrected"
+
+            n_updated += 1
+
+    logger.info("Storage plants hydrologically corrected: %s", n_updated)
+
+    return corrected
+
+def plot_efas_storage_paper_case(
+    plant_index,
+    hydro_ppls: pd.DataFrame,
+    df_drain: pd.DataFrame,
+    final_matches: pd.DataFrame,
+    efas_dir: Path,
+    var_name: str,
+    file_template: str,
+    year: int,
+    output_path: Path,
+    context_km: float = 15.0,
+    marker_offset_km: float = 0.8,
+) -> None:
+    """
+    Create the paper figure showing one storage correction case.
+
+    The figure compares:
+    - nearest drain node to the plant
+    - selected node after hydrological storage correction
+    - discharge time series at both nodes
+    """
+    if plant_index not in hydro_ppls.index:
+        logger.warning("Storage paper figure skipped. Plant index not found: %s", plant_index)
+        return
+
+    final_by_plant = final_matches.set_index(final_matches["plant_index"].astype(str), drop=False)
+    plant_key = str(plant_index)
+
+    if plant_key not in final_by_plant.index:
+        logger.warning("Storage paper figure skipped. Plant missing in final_matches: %s", plant_index)
+        return
+
+    final_row = final_by_plant.loc[plant_key]
+
+    if isinstance(final_row, pd.DataFrame):
+        final_row = final_row.iloc[0]
+
+    selected_model_id = str(final_row["model_id"])
+
+    if selected_model_id not in set(df_drain["model_id"].astype(str)):
+        logger.warning(
+            "Storage paper figure skipped. Selected model_id not found in drain table: %s",
+            selected_model_id,
+        )
+        return
+
+    plant = hydro_ppls.loc[plant_index]
+    plant_lon = float(plant["lon"])
+    plant_lat = float(plant["lat"])
+
+    df_drain = df_drain.copy()
+    df_drain["model_id"] = df_drain["model_id"].astype(str)
+    drain_by_id = df_drain.set_index("model_id", drop=False)
+
+    drain_lons = df_drain["x"].to_numpy(dtype=float)
+    drain_lats = df_drain["y"].to_numpy(dtype=float)
+    mean_lat = float(np.nanmean(drain_lats))
+
+    drain_xy_km = np.column_stack(
+        [
+            drain_lons * 111.0 * np.cos(np.deg2rad(mean_lat)),
+            drain_lats * 111.0,
+        ]
+    )
+
+    drain_tree = cKDTree(drain_xy_km)
+
+    plant_xy_km = np.array(
+        [
+            plant_lon * 111.0 * np.cos(np.deg2rad(mean_lat)),
+            plant_lat * 111.0,
+        ]
+    )
+
+    _, nearest_idx = drain_tree.query(plant_xy_km, k=1)
+
+    nearest_row = df_drain.iloc[int(nearest_idx)].copy()
+    nearest_model_id = str(nearest_row["model_id"])
+
+    selected_row = drain_by_id.loc[selected_model_id]
+
+    nc_path = efas_dir / file_template.format(year=year)
+
+    with xr.open_dataset(nc_path) as ds:
+        river = ds[var_name]
+
+        s_nearest = river.sel(
+            longitude=float(nearest_row["x"]),
+            latitude=float(nearest_row["y"]),
+            method="nearest",
+        ).load().to_series()
+
+        s_selected = river.sel(
+            longitude=float(selected_row["x"]),
+            latitude=float(selected_row["y"]),
+            method="nearest",
+        ).load().to_series()
+
+    s_nearest.index = pd.to_datetime(s_nearest.index)
+    s_selected.index = pd.to_datetime(s_selected.index)
+
+    corr = compute_corr(s_nearest, s_selected)
+
+    buf_lon = km_to_deg_lon(context_km, plant_lat)
+    buf_lat = km_to_deg_lat(context_km)
+
+    drain_context = df_drain[
+        (df_drain["x"] >= plant_lon - buf_lon)
+        & (df_drain["x"] <= plant_lon + buf_lon)
+        & (df_drain["y"] >= plant_lat - buf_lat)
+        & (df_drain["y"] <= plant_lat + buf_lat)
+    ].copy()
+
+    if not drain_context.empty:
+        drain_context["distance_km"] = approx_dist_km(
+            lon=plant_lon,
+            lat=plant_lat,
+            lon2=drain_context["x"].to_numpy(dtype=float),
+            lat2=drain_context["y"].to_numpy(dtype=float),
+        )
+        drain_context = drain_context[drain_context["distance_km"] <= context_km].copy()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(15, 6), facecolor="white")
+    gs = GridSpec(1, 2, width_ratios=[1.0, 1.2], figure=fig)
+
+    ax_map = fig.add_subplot(gs[0, 0])
+    ax_ts = fig.add_subplot(gs[0, 1])
+
+    if not drain_context.empty:
+        areas = drain_context["drainage_area"].to_numpy(dtype=float)
+        areas = areas[np.isfinite(areas) & (areas > 0)]
+
+        if len(areas) > 0:
+            norm = LogNorm(vmin=areas.min(), vmax=areas.max())
+
+            sc = ax_map.scatter(
+                drain_context["x"],
+                drain_context["y"],
+                c=drain_context["drainage_area"],
+                cmap="viridis",
+                norm=norm,
+                s=180,
+                edgecolor="none",
+                alpha=0.75,
+                label="Drain nodes",
+                zorder=1,
+            )
+
+            cbar = fig.colorbar(sc, ax=ax_map, fraction=0.046, pad=0.02)
+            cbar.set_label("Drainage area (km²)", fontsize=12)
+            cbar.ax.tick_params(labelsize=11)
+
+    ax_map.scatter(
+        float(nearest_row["x"]),
+        float(nearest_row["y"]),
+        marker="o",
+        s=420,
+        facecolor="none",
+        edgecolor="black",
+        linewidth=2.5,
+        label="Nearest candidate",
+        zorder=5,
+    )
+
+    dy = km_to_deg_lat(marker_offset_km)
+
+    ax_map.plot(
+        [float(selected_row["x"]), float(selected_row["x"])],
+        [float(selected_row["y"]), float(selected_row["y"]) + dy],
+        color="red",
+        linewidth=1.4,
+        zorder=6,
+    )
+
+    ax_map.scatter(
+        float(selected_row["x"]),
+        float(selected_row["y"]) + dy,
+        marker="v",
+        s=320,
+        c="red",
+        edgecolor="black",
+        linewidth=0.8,
+        label="Selected point",
+        zorder=7,
+    )
+
+    ax_map.scatter(
+        plant_lon,
+        plant_lat,
+        marker="^",
+        s=320,
+        c="green",
+        edgecolor="black",
+        linewidth=0.8,
+        alpha=0.9,
+        label="Hydropower plant",
+        zorder=8,
+    )
+
+    all_x_parts = [
+        np.array(
+            [
+                plant_lon,
+                float(nearest_row["x"]),
+                float(selected_row["x"]),
+            ]
+        )
+    ]
+
+    all_y_parts = [
+        np.array(
+            [
+                plant_lat,
+                float(nearest_row["y"]),
+                float(selected_row["y"]) + dy,
+            ]
+        )
+    ]
+
+    if not drain_context.empty:
+        all_x_parts.append(drain_context["x"].to_numpy(dtype=float))
+        all_y_parts.append(drain_context["y"].to_numpy(dtype=float))
+
+    all_x = np.concatenate(all_x_parts)
+    all_y = np.concatenate(all_y_parts)
+
+    pad_x = max(
+        (all_x.max() - all_x.min()) * 0.08,
+        km_to_deg_lon(context_km * 0.08, plant_lat),
+    )
+    pad_y = max(
+        (all_y.max() - all_y.min()) * 0.08,
+        km_to_deg_lat(context_km * 0.08),
+    )
+
+    ax_map.set_xlim(all_x.min() - pad_x, all_x.max() + pad_x)
+    ax_map.set_ylim(all_y.min() - pad_y, all_y.max() + pad_y)
+
+    ax_map.set_title(
+        f"Storage correction case: {plant.get('Name', plant_index)}",
+        fontsize=13,
+    )
+    ax_map.set_xlabel("Longitude", fontsize=12)
+    ax_map.set_ylabel("Latitude", fontsize=12)
+    ax_map.grid(True, alpha=0.3)
+    ax_map.legend(loc="best", fontsize=10, markerscale=0.7)
+
+    ax_ts.plot(
+        s_nearest.index,
+        s_nearest.values,
+        label="Nearest candidate",
+        c="green",
+        linewidth=1.7,
+    )
+
+    ax_ts.plot(
+        s_selected.index,
+        s_selected.values,
+        label="Selected point",
+        c="red",
+        linewidth=1.7,
+    )
+
+    ax_ts.set_title(
+        f"EFAS discharge comparison, {year}\n"
+        f"corr = {corr:.3f} | status={final_row.get('correction_status', '')}",
+        fontsize=13,
+    )
+    ax_ts.set_ylabel("River discharge (m³/s)", fontsize=12)
+    ax_ts.grid(True, alpha=0.3)
+    ax_ts.legend(fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    logger.info("EFAS storage paper figure saved: %s", output_path)
+
+def plot_hydro_matches_on_drainage_network_plotly(
+    df_drain: pd.DataFrame,
+    hydro_ppls: pd.DataFrame,
+    final_matches: pd.DataFrame,
+    output_html_path: Path,
+    title: str = "Hydropower plants matched to EFAS drainage network",
+    max_hover_chars: int = 100,
+) -> None:
+    """
+    Plot the drainage network, original hydropower plant locations,
+    and matched EFAS/drainage points.
+
+    The plot includes:
+    - drainage nodes colored by drainage area
+    - downstream drainage links
+    - original hydropower plant coordinates in green
+    - matched EFAS/drainage points in red
+    """
+
+    required_drain_cols = {
+        "model_id",
+        "downstream_model_id",
+        "drainage_area",
+        "x",
+        "y",
+    }
+
+    missing_drain_cols = required_drain_cols - set(df_drain.columns)
+    if missing_drain_cols:
+        raise ValueError(
+            f"Missing required columns in df_drain: {sorted(missing_drain_cols)}"
+        )
+
+    required_plant_cols = {
+        "lon",
+        "lat",
+    }
+
+    missing_plant_cols = required_plant_cols - set(hydro_ppls.columns)
+    if missing_plant_cols:
+        raise ValueError(
+            f"Missing required columns in hydro_ppls: {sorted(missing_plant_cols)}"
+        )
+
+    required_match_cols = {
+        "plant_index",
+        "matched_lon",
+        "matched_lat",
+        "model_id",
+        "match_type",
+    }
+
+    missing_match_cols = required_match_cols - set(final_matches.columns)
+    if missing_match_cols:
+        raise ValueError(
+            f"Missing required columns in final_matches: {sorted(missing_match_cols)}"
+        )
+
+    df_plot = df_drain.copy()
+    df_plot["model_id"] = df_plot["model_id"].astype(str)
+
+    coord_map = dict(
+        zip(
+            df_plot["model_id"],
+            zip(df_plot["x"].astype(float), df_plot["y"].astype(float)),
+        )
+    )
+
+    edge_x = []
+    edge_y = []
+    n_edges = 0
+    n_missing_downstream = 0
+
+    for _, row in df_plot.iterrows():
+        model_id = row["model_id"]
+        downstream_model_id = row["downstream_model_id"]
+
+        if pd.isna(downstream_model_id) or downstream_model_id is None:
+            continue
+
+        downstream_model_id = str(downstream_model_id)
+
+        if downstream_model_id not in coord_map:
+            n_missing_downstream += 1
+            continue
+
+        x1, y1 = coord_map[model_id]
+        x2, y2 = coord_map[downstream_model_id]
+
+        edge_x.extend([x1, x2, None])
+        edge_y.extend([y1, y2, None])
+        n_edges += 1
+
+    drain_hover_text = []
+
+    for _, row in df_plot.iterrows():
+        downstream_model_id = row["downstream_model_id"]
+
+        if pd.isna(downstream_model_id) or downstream_model_id is None:
+            downstream_text = "None"
+        else:
+            downstream_text = str(downstream_model_id)
+
+        if len(downstream_text) > max_hover_chars:
+            downstream_text = downstream_text[:max_hover_chars] + "..."
+
+        hover_items = [
+            f"model_id: {row['model_id']}",
+            f"downstream_model_id: {downstream_text}",
+            f"Drainage area: {float(row['drainage_area']):,.2f} km²",
+            f"Longitude: {float(row['x']):.5f}",
+            f"Latitude: {float(row['y']):.5f}",
+        ]
+
+        if "strahler_order" in row and pd.notna(row["strahler_order"]):
+            hover_items.insert(2, f"Strahler order: {int(row['strahler_order'])}")
+
+        drain_hover_text.append("<br>".join(hover_items))
+
+    blues_no_white = sample_colorscale(
+        "Blues",
+        [0.15, 0.30, 0.45, 0.60, 0.75, 0.90, 1.0],
+    )
+
+    edge_trace = go.Scattergl(
+        x=edge_x,
+        y=edge_y,
+        mode="lines",
+        line=dict(
+            width=1,
+            color="rgba(0, 0, 0, 0.25)",
+        ),
+        hoverinfo="skip",
+        name="Downstream links",
+    )
+
+    drain_node_trace = go.Scattergl(
+        x=df_plot["x"],
+        y=df_plot["y"],
+        mode="markers",
+        marker=dict(
+            size=4,
+            color=df_plot["drainage_area"],
+            colorscale=blues_no_white,
+            showscale=True,
+            colorbar=dict(
+                title="Drainage area<br>(km²)",
+            ),
+            opacity=0.75,
+        ),
+        text=drain_hover_text,
+        hoverinfo="text",
+        name="Drainage nodes",
+    )
+
+    plants_plot = hydro_ppls.copy()
+    plants_plot = plants_plot.dropna(subset=["lon", "lat"]).copy()
+
+    plant_names = []
+
+    for idx, row in plants_plot.iterrows():
+        if "Name" in plants_plot.columns and pd.notna(row["Name"]):
+            plant_name = str(row["Name"])
+        elif "name" in plants_plot.columns and pd.notna(row["name"]):
+            plant_name = str(row["name"])
+        elif "PlantName" in plants_plot.columns and pd.notna(row["PlantName"]):
+            plant_name = str(row["PlantName"])
+        else:
+            plant_name = str(idx)
+
+        hover_items = [
+            f"plant_index: {idx}",
+            f"plant_name: {plant_name}",
+            f"Original longitude: {float(row['lon']):.5f}",
+            f"Original latitude: {float(row['lat']):.5f}",
+        ]
+
+        if "Technology" in plants_plot.columns and pd.notna(row["Technology"]):
+            hover_items.append(f"Technology: {row['Technology']}")
+
+        if "Capacity" in plants_plot.columns and pd.notna(row["Capacity"]):
+            hover_items.append(f"Capacity: {float(row['Capacity']):,.2f} MW")
+
+        if "qmax_turb" in plants_plot.columns and pd.notna(row["qmax_turb"]):
+            hover_items.append(f"qmax_turb: {float(row['qmax_turb']):,.2f} m³/s")
+
+        plant_names.append("<br>".join(hover_items))
+
+    original_plants_trace = go.Scattergl(
+        x=plants_plot["lon"],
+        y=plants_plot["lat"],
+        mode="markers",
+        marker=dict(
+            size=10,
+            color="green",
+            symbol="circle",
+            line=dict(
+                width=1,
+                color="black",
+            ),
+            opacity=0.90,
+        ),
+        text=plant_names,
+        hoverinfo="text",
+        name="Original hydropower plants",
+    )
+
+    matches_plot = final_matches.copy()
+    matches_plot = matches_plot.dropna(subset=["matched_lon", "matched_lat"]).copy()
+
+    match_hover_text = []
+
+    hydro_lookup = hydro_ppls.copy()
+
+    for _, row in matches_plot.iterrows():
+        plant_index = row["plant_index"]
+
+        hover_items = [
+            f"plant_index: {plant_index}",
+            f"matched model_id: {row['model_id']}",
+            f"Matched longitude: {float(row['matched_lon']):.5f}",
+            f"Matched latitude: {float(row['matched_lat']):.5f}",
+            f"match_type: {row['match_type']}",
+        ]
+
+        if "distance_km" in matches_plot.columns and pd.notna(row["distance_km"]):
+            hover_items.append(f"distance_km: {float(row['distance_km']):.2f}")
+
+        if "river_mean" in matches_plot.columns and pd.notna(row["river_mean"]):
+            hover_items.append(f"river_mean: {float(row['river_mean']):,.2f} m³/s")
+
+        if "correction_status" in matches_plot.columns and pd.notna(row["correction_status"]):
+            hover_items.append(f"correction_status: {row['correction_status']}")
+
+        if plant_index in hydro_lookup.index:
+            plant_row = hydro_lookup.loc[plant_index]
+
+            if "Name" in hydro_lookup.columns and pd.notna(plant_row.get("Name")):
+                hover_items.insert(1, f"plant_name: {plant_row['Name']}")
+            elif "name" in hydro_lookup.columns and pd.notna(plant_row.get("name")):
+                hover_items.insert(1, f"plant_name: {plant_row['name']}")
+            elif "PlantName" in hydro_lookup.columns and pd.notna(plant_row.get("PlantName")):
+                hover_items.insert(1, f"plant_name: {plant_row['PlantName']}")
+
+            if "Technology" in hydro_lookup.columns and pd.notna(plant_row.get("Technology")):
+                hover_items.append(f"Technology: {plant_row['Technology']}")
+
+            if "Capacity" in hydro_lookup.columns and pd.notna(plant_row.get("Capacity")):
+                hover_items.append(f"Capacity: {float(plant_row['Capacity']):,.2f} MW")
+
+        match_hover_text.append("<br>".join(hover_items))
+
+    matched_points_trace = go.Scattergl(
+        x=matches_plot["matched_lon"],
+        y=matches_plot["matched_lat"],
+        mode="markers",
+        marker=dict(
+            size=11,
+            color="red",
+            symbol="x",
+            line=dict(
+                width=2,
+                color="red",
+            ),
+            opacity=0.95,
+        ),
+        text=match_hover_text,
+        hoverinfo="text",
+        name="Matched EFAS/drain points",
+    )
+
+    match_line_x = []
+    match_line_y = []
+
+    for _, row in matches_plot.iterrows():
+        plant_index = row["plant_index"]
+
+        if plant_index not in hydro_ppls.index:
+            continue
+
+        plant_row = hydro_ppls.loc[plant_index]
+
+        if pd.isna(plant_row["lon"]) or pd.isna(plant_row["lat"]):
+            continue
+
+        x1 = float(plant_row["lon"])
+        y1 = float(plant_row["lat"])
+        x2 = float(row["matched_lon"])
+        y2 = float(row["matched_lat"])
+
+        match_line_x.extend([x1, x2, None])
+        match_line_y.extend([y1, y2, None])
+
+    plant_to_match_trace = go.Scattergl(
+        x=match_line_x,
+        y=match_line_y,
+        mode="lines",
+        line=dict(
+            width=1,
+            color="rgba(255, 0, 0, 0.35)",
+            dash="dot",
+        ),
+        hoverinfo="skip",
+        name="Plant-to-match links",
+    )
+
+    fig = go.Figure(
+        data=[
+            edge_trace,
+            drain_node_trace,
+            plant_to_match_trace,
+            original_plants_trace,
+            matched_points_trace,
+        ]
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Longitude",
+        yaxis_title="Latitude",
+        template="plotly_white",
+        width=1500,
+        height=800,
+        showlegend=True,
+        hovermode="closest",
+        margin=dict(l=40, r=40, t=70, b=40),
+    )
+
+    fig.update_yaxes(
+        scaleanchor="x",
+        scaleratio=1,
+    )
+
+    fig.write_html(
+        str(output_html_path),
+        include_plotlyjs="cdn",
+        full_html=True,
+        auto_open=False,
+    )
+
+    logger.info("Hydro match diagnostic Plotly HTML saved: %s", output_html_path)
+
+    if n_missing_downstream > 0:
+        logger.warning(
+            "%s downstream links were skipped because downstream_model_id was not found in df_drain.",
+            f"{n_missing_downstream:,}",
+        )
+
+# ============================================================
+# SERIES EXTRACTION
+# ============================================================
+
+def build_final_matches(matched_df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "plant_index",
+        "model_id",
+        "HYBAS_ID",
+        "cluster",
+        "node",
+        "matched_lon",
+        "matched_lat",
+        "distance_km",
+        "river_mean",
+        "match_type",
+        "correction_status",
+    ]
+
+    if matched_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    return matched_df.reindex(columns=cols).copy()
+
+    
+def extract_efas_series(
+    final_matches: pd.DataFrame,
+    efas_dir: Path,
+    years: list[int],
+    var_name: str,
+    file_template: str,
+) -> dict[int, xr.DataArray]:
+    plant_names = final_matches["plant_index"].astype(str).tolist()
+    plant_lats = final_matches["matched_lat"].to_numpy(dtype=float)
+    plant_lons = final_matches["matched_lon"].to_numpy(dtype=float)
+
+    all_years_series_clean = {}
+
+    first_year = years[0]
+    first_path = efas_dir / file_template.format(year=first_year)
+
+    if not first_path.exists():
+        raise FileNotFoundError(f"Missing first EFAS file: {first_path}")
+
+    with xr.open_dataset(first_path) as ds0:
+        river0 = ds0[var_name]
+
+        lat_grid = river0["latitude"].values
+        lon_grid = river0["longitude"].values
+
+        lat_idx = np.abs(lat_grid[:, None] - plant_lats).argmin(axis=0)
+        lon_idx = np.abs(lon_grid[:, None] - plant_lons).argmin(axis=0)
+
+    bad_plants_mask = None
+
+    for i, year in enumerate(years):
+        nc_path = efas_dir / file_template.format(year=year)
+
+        if not nc_path.exists():
+            raise FileNotFoundError(f"Missing EFAS file for year {year}: {nc_path}")
+
+        logger.info("Processing EFAS year %s: %s", year, nc_path)
+
+        with xr.open_dataset(nc_path) as ds:
+            river = ds[var_name]
+            time_dim = "valid_time" if "valid_time" in river.dims else "time"
+
+            data = river.values
+            extracted = data[:, lat_idx, lon_idx].T
+
+            time_vals = pd.to_datetime(river[time_dim].values)
+
+            mask = ~((time_vals.month == 2) & (time_vals.day == 29))
+            extracted = extracted[:, mask]
+            time_vals = time_vals[mask]
+
+            year_all_nan = np.all(np.isnan(extracted), axis=1)
+
+            if i == 0:
+                bad_plants_mask = year_all_nan.copy()
+
+                logger.debug("Series fully NaN in first year: %s", int(bad_plants_mask.sum()))
+
+                if bad_plants_mask.any():
+                    bad_df = pd.DataFrame(
+                        {
+                            "plant": np.array(plant_names)[bad_plants_mask],
+                            "matched_lon": plant_lons[bad_plants_mask],
+                            "matched_lat": plant_lats[bad_plants_mask],
+                        }
+                    )
+
+                    logger.debug("Plants with fully NaN series in first year:")
+                    logger.debug(bad_df.to_string(index=False))
+
+            if bad_plants_mask is not None and bad_plants_mask.any():
+                extracted[bad_plants_mask, :] = 0.1
+
+            da_year = xr.DataArray(
+                extracted,
+                dims=["plant", "time"],
+                coords={
+                    "plant": plant_names,
+                    "time": time_vals,
+                },
+                name="river_series",
+            )
+
+            all_years_series_clean[year] = da_year
+
+    return all_years_series_clean
+
+
+def get_time_dim(da: xr.DataArray) -> str:
+    if "valid_time" in da.dims:
+        return "valid_time"
+
+    if "time" in da.dims:
+        return "time"
+
+    non_plant_dims = [dim for dim in da.dims if dim != "plant"]
+
+    if len(non_plant_dims) != 1:
+        raise ValueError(f"Cannot infer time dimension from dims: {da.dims}")
+
+    return non_plant_dims[0]
+
+
+def prepare_rivid_map(
+    final_matches: pd.DataFrame,
+    all_years_series_clean: dict[int, xr.DataArray],
+) -> pd.DataFrame:
+    if final_matches.empty:
+        raise ValueError("final_matches is empty. Cannot build rivid map.")
+
+    year_ref = sorted(all_years_series_clean.keys())[0]
+    da_ref = all_years_series_clean[year_ref]
+
+    valid_plants = set(da_ref.coords["plant"].values.astype(str))
+
+    rivid_map = final_matches.copy()
+    rivid_map["plant"] = rivid_map["plant_index"].astype(str)
+
+    rivid_map = rivid_map[rivid_map["plant"].isin(valid_plants)].copy()
+
+    if rivid_map.empty:
+        raise ValueError("No final_matches plants are present in all_years_series_clean.")
+
+    rivid_map = rivid_map.sort_values("plant").reset_index(drop=True)
+    rivid_map["rivid"] = np.arange(len(rivid_map), dtype=int)
+
+    keep_cols = [
+        "rivid",
+        "plant",
+        "plant_index",
+        "model_id",
+        "HYBAS_ID",
+        "cluster",
+        "node",
+        "matched_lon",
+        "matched_lat",
+        "distance_km",
+        "river_mean",
+        "match_type",
+        "correction_status",
+    ]
+
+    keep_cols = [col for col in keep_cols if col in rivid_map.columns]
+
+    return rivid_map[keep_cols].copy()
+
+
+def build_saber_qsim_dataset(
+    all_years_series_clean: dict[int, xr.DataArray],
+    rivid_map: pd.DataFrame,
+) -> xr.Dataset:
+    rivid_map = rivid_map.sort_values("rivid")
+
+    plant_order = rivid_map["plant"].astype(str).tolist()
+    rivid_order = rivid_map["rivid"].to_numpy(dtype=int)
+
+    yearly_arrays = []
+
+    for year in sorted(all_years_series_clean):
+        da = all_years_series_clean[year]
+
+        time_dim = get_time_dim(da)
+
+        if time_dim != "time":
+            da = da.rename({time_dim: "time"})
+
+        available_plants = set(da.coords["plant"].values.astype(str))
+        missing = [plant for plant in plant_order if plant not in available_plants]
+
+        if missing:
+            raise ValueError(
+                f"Year {year}: {len(missing)} plants are missing from extracted series. "
+                f"First missing plants: {missing[:10]}"
+            )
+
+        da = da.sel(plant=plant_order)
+        yearly_arrays.append(da)
+
+    da_all = xr.concat(yearly_arrays, dim="time")
+    da_all = da_all.sortby("time")
+
+    _, unique_index = np.unique(da_all["time"].values, return_index=True)
+    da_all = da_all.isel(time=np.sort(unique_index))
+
+    qsim = da_all.transpose("time", "plant").values.astype("float32")
+
+    ds = xr.Dataset(
+        data_vars={
+            "Qsim": (("time", "rivid"), qsim),
+        },
+        coords={
+            "time": pd.to_datetime(da_all["time"].values),
+            "rivid": rivid_order,
+        },
+    )
+
+    return ds
+
+
+# ============================================================
+# SAVE
+# ============================================================
+
+def save_outputs(
+    final_matches: pd.DataFrame,
+    all_years_series_clean: dict[int, xr.DataArray],
+) -> None:
+    FINAL_MATCHES_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SERIES_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RIVID_MAP_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ZARR_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    final_matches.to_parquet(FINAL_MATCHES_OUTPUT_PATH, index=False)
+
+    with open(SERIES_OUTPUT_PATH, "wb") as f:
+        pickle.dump(all_years_series_clean, f)
+
+    rivid_map = prepare_rivid_map(
+        final_matches=final_matches,
+        all_years_series_clean=all_years_series_clean,
+    )
+
+    rivid_map.to_csv(RIVID_MAP_OUTPUT_PATH, index=False)
+
+    ds_saber = build_saber_qsim_dataset(
+        all_years_series_clean=all_years_series_clean,
+        rivid_map=rivid_map,
+    )
+
+    ds_saber.to_zarr(ZARR_OUTPUT_PATH, mode="w")
+
+    logger.info("Final matches output saved: %s", FINAL_MATCHES_OUTPUT_PATH)
+    logger.info("Series output saved: %s", SERIES_OUTPUT_PATH)
+    logger.info("Rivid map output saved: %s", RIVID_MAP_OUTPUT_PATH)
+    logger.info("SABER Zarr output saved: %s", ZARR_OUTPUT_PATH)
+    logger.debug("SABER dataset:\n%s", ds_saber)
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main() -> None:
+    setup_logging()
+    log_config_summary(CFG)
+
+    t0 = time.time()
+
+    hydro_ppls = load_hydro_power_plants(
+        plants_path=PLANTS_PATH,
+        lon_min=LON_MIN,
+        lon_max=LON_MAX,
+        lat_min=LAT_MIN,
+        lat_max=LAT_MAX,
+        efficiency=EFFICIENCY,
+    )
+
+    river_bbox, river_mean = build_river_bbox_and_mean(
+        hydro_ppls=hydro_ppls,
+        river_reference_path=RIVER_REFERENCE_PATH,
+        var_name=EFAS_VAR_NAME,
+        margin_deg=MARGIN_DEG,
+    )
+
+    plants_with_storage = build_storage_plants(hydro_ppls)
+
+    df_drain = load_drain_table(DRAIN_FULL_PATH)
+
+    plants_gdf = prepare_plants_gdf(hydro_ppls)
+
+    matched_df = match_plants_to_drain(
+        plants_gdf=plants_gdf,
+        df_drain=df_drain,
+        river_mean=river_mean,
+        max_distance_km=MAX_DISTANCE_KM,
+        k_neigh=K_NEIGH_FALLBACK,
+    )
+
+    storage_plant_indices = set(plants_with_storage.index)
+
+    matched_df = correct_storage_matches(
+        matched_df=matched_df,
+        df_drain=df_drain,
+        river_bbox=river_bbox,
+        storage_plant_indices=storage_plant_indices,
+        window=WINDOW,
+        area_jump_threshold=AREA_JUMP_THRESHOLD,
+        corr_threshold=CORR_THRESHOLD,
+        do_plot=SHOW_CORR_BREAK_PLOTS,
+        verbose=DEBUG,
+    )
+
+    final_matches = build_final_matches(matched_df)
+
+    logger.info("Total plants for extraction: %s", len(final_matches))
+
+    if MAKE_PAPER_FIGURES:
+        plot_efas_ror_paper_case(
+            plant_index=PAPER_ROR_PLANT_INDEX,
+            hydro_ppls=hydro_ppls,
+            df_drain=df_drain,
+            river_mean=river_mean,
+            efas_dir=EFAS_EU_DIR,
+            var_name=EFAS_VAR_NAME,
+            file_template=EFAS_FILE_TEMPLATE,
+            year=PAPER_ROR_YEAR,
+            output_path=PAPER_ROR_FIGURE_PATH,
+            k_neigh=K_NEIGH_FALLBACK,
+            max_distance_km=MAX_DISTANCE_KM,
+            min_river_qmax_ratio=MIN_RIVER_QMAX_RATIO,
+            context_km=10.0,
+            marker_offset_km=0.6,
+        )
+
+        plot_efas_storage_paper_case(
+            plant_index=PAPER_STORAGE_PLANT_INDEX,
+            hydro_ppls=hydro_ppls,
+            df_drain=df_drain,
+            final_matches=final_matches,
+            efas_dir=EFAS_EU_DIR,
+            var_name=EFAS_VAR_NAME,
+            file_template=EFAS_FILE_TEMPLATE,
+            year=PAPER_STORAGE_YEAR,
+            output_path=PAPER_STORAGE_FIGURE_PATH,
+            context_km=15.0,
+            marker_offset_km=0.8,
+        )
+    else:
+        logger.debug(
+            "EFAS paper figures disabled. "
+            "Set HYDRO_MAKE_PAPER_FIGURES=1 to enable them."
+        )
+
+    all_years_series_clean = extract_efas_series(
+        final_matches=final_matches,
+        efas_dir=EFAS_EU_DIR,
+        years=YEARS,
+        var_name=EFAS_VAR_NAME,
+        file_template=EFAS_FILE_TEMPLATE,
+    )
+
+    save_outputs(
+        final_matches=final_matches,
+        all_years_series_clean=all_years_series_clean,
+    )
+
+    if MAKE_MATCH_PLOT:
+        plot_hydro_matches_on_drainage_network_plotly(
+            df_drain=df_drain,
+            hydro_ppls=hydro_ppls,
+            final_matches=final_matches,
+            output_html_path=MATCH_PLOT_HTML_OUTPUT_PATH,
+            title=(
+                f"Hydropower plants matched to {CFG['dataset'].upper()} "
+                "drainage network"
+            ),
+        )
+    else:
+        logger.debug(
+            "Hydro plant match diagnostic plot disabled. "
+            "Set HYDRO_MAKE_DIAGNOSTIC_PLOTS=1 to enable it."
+        )
+
+    logger.info("Hydropower plant series extraction completed.")
+    logger.debug("Total time: %.1f s", time.time() - t0)
+
+
+if __name__ == "__main__":
+    main()

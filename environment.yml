@@ -1,0 +1,87 @@
+name: pypsa-eur-hydro
+channels:
+  - conda-forge
+  - gurobi
+  - nodefaults
+
+dependencies:
+  - python=3.11
+  - pip
+
+  - pypsa>=0.35
+  - linopy>=0.6
+
+  - highspy
+  - glpk
+  - gurobi
+
+  - numpy>=1.26,<2.3
+  - pandas>=2.1
+  - scipy
+  - xarray>=2024.3,<2025.7
+  - netcdf4
+  - h5netcdf
+  - zarr
+  - dask
+  - pytables
+  - openpyxl
+  - xlrd
+  - pyxlsb
+
+  - geopandas>=1
+  - shapely>=2
+  - fiona
+  - rasterio
+  - rioxarray
+  - rasterstats
+  - cartopy
+  - proj
+  - libgdal-netcdf
+  - rtree
+  - geopy
+  - geojson
+
+  - matplotlib
+  - seaborn
+  - plotly
+  - bokeh
+  - folium
+  - contextily
+  - pydeck
+  - jupyter
+  - ipykernel
+  - nbformat
+
+  - country_converter
+  - powerplantmatching
+  - atlite>=0.3,!=0.5.0
+  - copernicusmarine
+  - entsoe-py
+  - tqdm
+  - ruamel.yaml
+  - pydantic>=2
+  - python-dotenv
+  - pre-commit
+  - ruff
+  - pylint
+  - memory_profiler
+  - tenacity
+  - natsort
+  - tsam
+  - kneed
+  - mercantile
+  - graphviz
+  - lxml
+  - jpype1
+  - grpcio<1.78
+
+  - pip:
+      - "snakemake>=8,<10"
+      - snakemake-storage-plugin-http
+      - snakemake-storage-plugin-cached-http
+      - snakemake-executor-plugin-cluster-generic
+      - snakemake-executor-plugin-slurm
+      - snakemake-logger-plugin-pypsa
+      - snakemake-logger-plugin-snkmt==0.1.6
+      - pydeflate>=2.3.4
+      - hydrostats==1.0.0
