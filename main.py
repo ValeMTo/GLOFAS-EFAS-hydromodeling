@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 from hydro_inflow.prepare_hydro_inputs import prepare_and_check_hydro_inputs
 from hydro_inflow.run_hydro_inflow_framework import run_hydro_inflow_framework
 from hydro_inflow.utils import setup_logging
+from postprocessing_workflow.run_postprocessing import run_postprocessing
 from pypsa_workflow.prepare_cutouts import prepare_cutouts
 from pypsa_workflow.run_pypsa_scenarios import run_pypsa_scenarios
 
@@ -13,14 +15,76 @@ from pypsa_workflow.run_pypsa_scenarios import run_pypsa_scenarios
 logger = logging.getLogger(__name__)
 
 
+WORKFLOW_STEPS = [
+    "prepare-hydro-inputs",
+    "run-hydro-inflow",
+    "prepare-cutouts",
+    "run-pypsa-scenarios",
+    "run-postprocessing",
+]
+
+
+def select_workflow_steps(
+    from_step: str | None,
+    to_step: str | None,
+) -> list[str]:
+    steps = WORKFLOW_STEPS
+
+    if from_step is not None:
+        if from_step not in steps:
+            available = "\n".join(f"  - {step}" for step in steps)
+            raise ValueError(
+                f"Unknown --from-step: {from_step}\n"
+                f"Available steps:\n{available}"
+            )
+
+        steps = steps[steps.index(from_step):]
+
+    if to_step is not None:
+        if to_step not in steps:
+            available = "\n".join(f"  - {step}" for step in steps)
+            raise ValueError(
+                f"Unknown --to-step: {to_step}\n"
+                f"Available steps in selected range:\n{available}"
+            )
+
+        steps = steps[: steps.index(to_step) + 1]
+
+    return steps
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the GloFAS/EFAS hydromodeling workflow."
+        description=(
+            "Run the complete GloFAS/EFAS hydromodeling workflow: "
+            "prepare hydro inputs, run hydro inflow preprocessing, run PyPSA-Eur, "
+            "and postprocess the results."
+        )
     )
 
     # ============================================================
-    # General
+    # General workflow control
     # ============================================================
+
+    parser.add_argument(
+        "--from-step",
+        choices=WORKFLOW_STEPS,
+        default=None,
+        help="Optional workflow step to start from.",
+    )
+
+    parser.add_argument(
+        "--to-step",
+        choices=WORKFLOW_STEPS,
+        default=None,
+        help="Optional workflow step to stop after.",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print workflow actions without executing external/expensive steps.",
+    )
 
     parser.add_argument(
         "--verbose",
@@ -29,14 +93,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ============================================================
-    # Hydro input preparation
+    # Hydro input preparation options
     # ============================================================
-
-    parser.add_argument(
-        "--prepare-hydro-inputs",
-        action="store_true",
-        help="Prepare and check hydro input data.",
-    )
 
     parser.add_argument(
         "--glofas-years",
@@ -59,40 +117,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-static",
         action="store_true",
-        help="Skip static hydro inputs such as HydroBASINS and GloFAS uparea.",
+        help="Debug option: skip static hydro inputs such as HydroBASINS and GloFAS uparea.",
     )
 
     parser.add_argument(
         "--skip-glofas",
         action="store_true",
-        help="Skip GloFAS download.",
+        help="Debug option: skip GloFAS download.",
     )
 
     parser.add_argument(
         "--skip-efas",
         action="store_true",
-        help="Skip EFAS download/process.",
+        help="Debug option: skip EFAS download/process.",
     )
 
     parser.add_argument(
         "--skip-entsoe",
         action="store_true",
-        help="Skip ENTSO-E hydro production download.",
-    )
-
-    parser.add_argument(
-        "--skip-manual-check",
-        action="store_true",
-        help=(
-            "Do not require manually provided files such as GRDC, GRanD, "
-            "EFAS uparea and Electricity Maps CH files in the final check."
-        ),
-    )
-
-    parser.add_argument(
-        "--skip-final-check",
-        action="store_true",
-        help="Skip the final hydro input availability check.",
+        help="Debug option: skip ENTSO-E hydro production download.",
     )
 
     parser.add_argument(
@@ -108,14 +151,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ============================================================
-    # Hydro inflow framework
+    # Hydro inflow framework options
     # ============================================================
-
-    parser.add_argument(
-        "--run-hydro-inflow",
-        action="store_true",
-        help="Run the hydro inflow framework.",
-    )
 
     parser.add_argument(
         "--hydro-dataset",
@@ -136,39 +173,21 @@ def parse_args() -> argparse.Namespace:
         help="Optional hydro inflow step script name to stop after.",
     )
 
-    parser.add_argument(
-        "--hydro-dry-run",
-        action="store_true",
-        help="Print selected hydro inflow functions without executing them.",
-    )
-
     # ============================================================
-    # PyPSA cutouts and scenarios
+    # PyPSA cutouts and scenario options
     # ============================================================
-
-    parser.add_argument(
-        "--prepare-cutouts",
-        action="store_true",
-        help="Prepare PyPSA-Eur cutouts.",
-    )
-
-    parser.add_argument(
-        "--run-pypsa-scenarios",
-        action="store_true",
-        help="Run PyPSA-Eur scenarios.",
-    )
 
     parser.add_argument(
         "--pypsa-group",
         choices=["historical", "2050", "all"],
-        default="historical",
+        default="all",
         help="PyPSA scenario group to run.",
     )
 
     parser.add_argument(
         "--pypsa-only",
         default=None,
-        help="Run only one PyPSA scenario or cutout, e.g. pypsa_2015 or cutout_2015.",
+        help="Debug option: run only one PyPSA scenario or cutout, e.g. pypsa_2015 or cutout_2015.",
     )
 
     parser.add_argument(
@@ -189,12 +208,6 @@ def parse_args() -> argparse.Namespace:
         "--pypsa-force",
         action="store_true",
         help="Run PyPSA scenario/cutout even if expected output already exists.",
-    )
-
-    parser.add_argument(
-        "--pypsa-dryrun",
-        action="store_true",
-        help="Only print PyPSA workflow actions. Do not copy configs or run Snakemake.",
     )
 
     parser.add_argument(
@@ -227,7 +240,129 @@ def parse_args() -> argparse.Namespace:
         help="Do not pass --printshellcmds to Snakemake for PyPSA scenarios.",
     )
 
+    # ============================================================
+    # Postprocessing options
+    # ============================================================
+
+    parser.add_argument(
+        "--postprocessing-hydro-results",
+        type=Path,
+        default=None,
+        help="Optional hydro_results directory. Default: repo_root/hydro_results.",
+    )
+
+    parser.add_argument(
+        "--postprocessing-overwrite",
+        action="store_true",
+        help="Overwrite files already present in hydro_results during postprocessing.",
+    )
+
+    parser.add_argument(
+        "--postprocessing-skip-copy",
+        action="store_true",
+        help="Debug option: do not copy PyPSA outputs, only run postprocessing scripts.",
+    )
+
+    parser.add_argument(
+        "--postprocessing-skip-processing",
+        action="store_true",
+        help="Debug option: only collect PyPSA outputs, do not run postprocessing scripts.",
+    )
+
     return parser.parse_args()
+
+
+def run_complete_workflow(args: argparse.Namespace) -> None:
+    selected_steps = select_workflow_steps(
+        from_step=args.from_step,
+        to_step=args.to_step,
+    )
+
+    logger.info("Selected workflow steps:")
+
+    for index, step in enumerate(selected_steps, start=1):
+        logger.info("  %s. %s", index, step)
+
+    if args.dry_run:
+        logger.info("Dry-run mode enabled.")
+
+    for step in selected_steps:
+        logger.info("")
+        logger.info("#" * 100)
+        logger.info("Workflow step: %s", step)
+        logger.info("#" * 100)
+
+        if step == "prepare-hydro-inputs":
+            if args.dry_run:
+                logger.info(
+                    "[dry-run] Would prepare hydro inputs "
+                    "(GloFAS years=%s, EFAS years=%s, ENTSO-E years=%s).",
+                    args.glofas_years,
+                    args.efas_years,
+                    args.entsoe_years,
+                )
+                continue
+
+            prepare_and_check_hydro_inputs(
+                glofas_years=args.glofas_years,
+                efas_years=args.efas_years,
+                entsoe_years=args.entsoe_years,
+                skip_static=args.skip_static,
+                skip_glofas=args.skip_glofas,
+                skip_efas=args.skip_efas,
+                skip_entsoe=args.skip_entsoe,
+                overwrite_static=args.overwrite_static,
+                overwrite_glohydrores=args.overwrite_glohydrores,
+            )
+
+        elif step == "run-hydro-inflow":
+            run_hydro_inflow_framework(
+                dataset=args.hydro_dataset,
+                start_from=args.hydro_start_from,
+                stop_after=args.hydro_stop_after,
+                dry_run=args.dry_run,
+            )
+
+        elif step == "prepare-cutouts":
+            prepare_cutouts(
+                cores=args.cutout_cores,
+                only=args.pypsa_only,
+                force=args.pypsa_force,
+                dryrun=args.dry_run,
+                snakemake_dryrun=args.pypsa_snakemake_dryrun,
+                no_restore_config=args.pypsa_no_restore_config,
+            )
+
+        elif step == "run-pypsa-scenarios":
+            run_pypsa_scenarios(
+                group=args.pypsa_group,
+                only=args.pypsa_only,
+                cores=args.pypsa_cores,
+                force=args.pypsa_force,
+                snakemake_dryrun=args.pypsa_snakemake_dryrun,
+                dryrun=args.dry_run,
+                no_restore_config=args.pypsa_no_restore_config,
+                keep_going=args.pypsa_keep_going,
+                rerun_incomplete=not args.pypsa_no_rerun_incomplete,
+                printshellcmds=not args.pypsa_no_printshellcmds,
+                prepare_cutouts_first=False,
+                cutout_cores=args.cutout_cores,
+            )
+
+        elif step == "run-postprocessing":
+            run_postprocessing(
+                overwrite=args.postprocessing_overwrite,
+                dry_run=args.dry_run,
+                skip_copy=args.postprocessing_skip_copy,
+                skip_processing=args.postprocessing_skip_processing,
+                hydro_results=args.postprocessing_hydro_results,
+            )
+
+        else:
+            raise RuntimeError(f"Unhandled workflow step: {step}")
+
+    logger.info("")
+    logger.info("Selected workflow steps completed.")
 
 
 def main() -> None:
@@ -236,65 +371,7 @@ def main() -> None:
     log_level = logging.DEBUG if args.verbose else logging.INFO
     setup_logging(level=log_level)
 
-    if args.prepare_hydro_inputs:
-        prepare_and_check_hydro_inputs(
-            glofas_years=args.glofas_years,
-            efas_years=args.efas_years,
-            entsoe_years=args.entsoe_years,
-            skip_static=args.skip_static,
-            skip_glofas=args.skip_glofas,
-            skip_efas=args.skip_efas,
-            skip_entsoe=args.skip_entsoe,
-            skip_manual_check=args.skip_manual_check,
-            skip_final_check=args.skip_final_check,
-            overwrite_static=args.overwrite_static,
-            overwrite_glohydrores=args.overwrite_glohydrores,
-        )
-
-    if args.run_hydro_inflow:
-        run_hydro_inflow_framework(
-            dataset=args.hydro_dataset,
-            start_from=args.hydro_start_from,
-            stop_after=args.hydro_stop_after,
-            dry_run=args.hydro_dry_run,
-        )
-
-    if args.prepare_cutouts:
-        prepare_cutouts(
-            cores=args.cutout_cores,
-            only=args.pypsa_only,
-            force=args.pypsa_force,
-            dryrun=args.pypsa_dryrun,
-            snakemake_dryrun=args.pypsa_snakemake_dryrun,
-            no_restore_config=args.pypsa_no_restore_config,
-        )
-
-    if args.run_pypsa_scenarios:
-        run_pypsa_scenarios(
-            group=args.pypsa_group,
-            only=args.pypsa_only,
-            cores=args.pypsa_cores,
-            force=args.pypsa_force,
-            snakemake_dryrun=args.pypsa_snakemake_dryrun,
-            dryrun=args.pypsa_dryrun,
-            no_restore_config=args.pypsa_no_restore_config,
-            keep_going=args.pypsa_keep_going,
-            rerun_incomplete=not args.pypsa_no_rerun_incomplete,
-            printshellcmds=not args.pypsa_no_printshellcmds,
-            prepare_cutouts_first=False,
-            cutout_cores=args.cutout_cores,
-        )
-
-    if (
-        not args.prepare_hydro_inputs
-        and not args.run_hydro_inflow
-        and not args.prepare_cutouts
-        and not args.run_pypsa_scenarios
-    ):
-        logger.info(
-            "No workflow step selected. Use --prepare-hydro-inputs, "
-            "--run-hydro-inflow, --prepare-cutouts and/or --run-pypsa-scenarios."
-        )
+    run_complete_workflow(args)
 
 
 if __name__ == "__main__":

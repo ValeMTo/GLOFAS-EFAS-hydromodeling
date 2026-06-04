@@ -2,3 +2,6 @@
 	path = external/pypsa-eur-hydro
 	url = https://github.com/ValeMTo/pypsa-eur-hydro.git
 	branch = glofas-efas-integration
+[submodule "external/saber-hbc"]
+	path = external/saber-hbc
+	url = https://github.com/Asdominet34/saber-hbc.git

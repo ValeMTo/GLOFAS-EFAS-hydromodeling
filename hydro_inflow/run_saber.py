@@ -9,18 +9,40 @@ from pathlib import Path
 from dataclasses import asdict
 import logging
 import os
+import sys
 
 import numpy as np
 import pandas as pd
 
-from saber.io import read_config, init_workdir, get_state
-from saber.cluster import cluster, predict_labels
-from saber.table import init, mp_prop_gauges, mp_prop_regulated
-from saber.assign import mp_assign
-from saber.saber import mp_saber
-
 from hydro_inflow.hydro_config import get_config, log_config_summary
-from hydro_inflow.utils import setup_logging
+from hydro_inflow.utils import get_repo_root, setup_logging
+
+
+def add_saber_to_pythonpath() -> Path:
+    repo_root = get_repo_root()
+    saber_root = repo_root / "external" / "saber-hbc"
+
+    if not saber_root.exists():
+        raise FileNotFoundError(
+            "SABER-HBC submodule not found:\n"
+            f"  {saber_root}\n\n"
+            "Initialize it with:\n"
+            "  git submodule update --init --recursive"
+        )
+
+    if str(saber_root) not in sys.path:
+        sys.path.insert(0, str(saber_root))
+
+    return saber_root
+
+
+SABER_ROOT = add_saber_to_pythonpath()
+
+from saber.io import read_config, init_workdir, get_state  # noqa: E402
+from saber.cluster import cluster, predict_labels  # noqa: E402
+from saber.table import init, mp_prop_gauges, mp_prop_regulated  # noqa: E402
+from saber.assign import mp_assign  # noqa: E402
+from saber.saber import mp_saber  # noqa: E402
 
 
 logger = logging.getLogger(__name__)

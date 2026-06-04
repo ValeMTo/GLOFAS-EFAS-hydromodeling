@@ -120,92 +120,6 @@ def download_and_extract_hydrobasins(data_root: Path, overwrite: bool = False) -
     return expected_shp
 
 
-def check_required_hydro_inputs(
-    data_root: Path,
-    cfg: dict,
-    *,
-    require_static: bool = True,
-    require_glofas: bool = True,
-    require_efas: bool = True,
-    require_entsoe: bool = True,
-    require_manual: bool = True,
-) -> None:
-    required_files: list[Path] = [
-        data_root / "hydro_global" / "Eur_custom_ppls_GloHydroRes_filled.csv",
-    ]
-
-    required_dirs: list[Path] = []
-
-    if require_static:
-        required_files.extend(
-            [
-                data_root / "hydro_global" / "uparea_glofas_v4_0.nc",
-            ]
-        )
-        required_dirs.extend(
-            [
-                data_root / "hydro_global" / "Hydrobasins" / "hybas_eu_",
-            ]
-        )
-
-    if require_manual:
-        required_files.extend(
-            [
-                data_root / "hydro_global" / "uparea_5.0_cut.nc",
-                data_root / "hydro_global" / "GRanD_reservoirs_v1_3.shp",
-                data_root / "Stations" / "GRDC_Europe.nc",
-            ]
-        )
-        required_dirs.append(Path(cfg["electricity_maps_dir"]))
-
-        for path in cfg["electricity_maps_ch_files"].values():
-            required_files.append(Path(path))
-
-    if require_glofas:
-        required_files.append(data_root / "glofas_europe" / "glofas_eu_2021.nc")
-
-    if require_efas:
-        required_files.append(data_root / "efas" / "efas_historical_2021_daily_cut.nc")
-
-    if require_entsoe:
-        required_dirs.extend(
-            [
-                Path(cfg["entsoe_hydro_dir"]),
-                Path(cfg["entsoe_hydro_hourly_dir"]),
-            ]
-        )
-
-        for year in cfg["entsoe_hydro_years"]:
-            required_files.append(
-                Path(cfg["entsoe_hydro_hourly_dir"]) / f"Europe_Hydro_{year}.csv"
-            )
-
-        required_files.append(Path(cfg["entsoe_hydro_annual_production_path"]))
-
-    missing = []
-
-    for path in required_files:
-        if path.exists():
-            logger.info("OK file: %s", path)
-        else:
-            logger.warning("Missing file: %s", path)
-            missing.append(path)
-
-    for path in required_dirs:
-        if path.exists():
-            logger.info("OK directory: %s", path)
-        else:
-            logger.warning("Missing directory: %s", path)
-            missing.append(path)
-
-    if missing:
-        missing_text = "\n".join(str(path) for path in missing)
-        raise FileNotFoundError(
-            "Missing required hydro input files/directories:\n"
-            f"{missing_text}"
-        )
-
-
 def prepare_and_check_hydro_inputs(
     *,
     glofas_years: str = "1980:2025",
@@ -215,8 +129,6 @@ def prepare_and_check_hydro_inputs(
     skip_glofas: bool = False,
     skip_efas: bool = False,
     skip_entsoe: bool = False,
-    skip_manual_check: bool = True,
-    skip_final_check: bool = False,
     overwrite_static: bool = False,
     overwrite_glohydrores: bool = False,
 ) -> None:
@@ -275,18 +187,4 @@ def prepare_and_check_hydro_inputs(
             exc,
         )
 
-    if skip_final_check:
-        logger.info("Skipping final hydro input check.")
-        return
-
-    check_required_hydro_inputs(
-        data_root=data_root,
-        cfg=cfg,
-        require_static=not skip_static,
-        require_glofas=not skip_glofas,
-        require_efas=not skip_efas,
-        require_entsoe=not skip_entsoe,
-        require_manual=not skip_manual_check,
-    )
-
-    logger.info("Hydro input preparation and checks completed.")
+    logger.info("Hydro input preparation completed.")

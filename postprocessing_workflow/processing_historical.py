@@ -17,7 +17,9 @@ import pypsa
 import os
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LinearSegmentedColormap, Normalize
+from hydro_inflow.utils import setup_logging
 
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # LOGGING / WARNINGS
@@ -137,22 +139,6 @@ def get_data_root():
     ).resolve()
 
 
-DEFAULT_HYDRO_RESULTS_PATH = get_hydro_results_root()
-
-DEFAULT_ENTSOE_PRODUCTION_PATH = (
-    get_data_root()
-    / "hydro_global"
-    / "ENTSOE"
-    / "Production"
-)
-
-DEFAULT_ELECTRICITY_MAPS_PATH = (
-    get_data_root()
-    / "hydro_global"
-    / "ENTSOE"
-    / "ElectricityMaps"
-)
-
 # ============================================================
 # CLI
 # ============================================================
@@ -165,21 +151,21 @@ def parse_args():
     parser.add_argument(
         "--hydro-results",
         type=Path,
-        default=DEFAULT_HYDRO_RESULTS_PATH,
+        default=None,
         help="Path to hydro_results directory.",
     )
 
     parser.add_argument(
         "--entsoe-production",
         type=Path,
-        default=DEFAULT_ENTSOE_PRODUCTION_PATH,
+        default=None,
         help="Path to ENTSO-E hydro production CSV files.",
     )
 
     parser.add_argument(
         "--electricity-maps",
         type=Path,
-        default=DEFAULT_ELECTRICITY_MAPS_PATH,
+        default=None,
         help="Path to Electricity Maps JSON files.",
     )
 
@@ -1295,15 +1281,47 @@ def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_pat
 
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main():
-    args = parse_args()
+def run_processing_historical(
+    hydro_results_path: Path | None = None,
+    entsoe_production_path: Path | None = None,
+    electricity_maps_path: Path | None = None,
+    output_dir: Path | None = None,
+) -> None:
+    hydro_results_path = (
+        hydro_results_path.resolve()
+        if hydro_results_path is not None
+        else get_hydro_results_root()
+    )
 
-    hydro_results_path = args.hydro_results
-    output_dir = args.output_dir or hydro_results_path / "images" / "historical"
+    data_root = get_data_root()
+
+    entsoe_production_path = (
+        entsoe_production_path.resolve()
+        if entsoe_production_path is not None
+        else data_root / "hydro_global" / "ENTSOE" / "Production"
+    )
+
+    electricity_maps_path = (
+        electricity_maps_path.resolve()
+        if electricity_maps_path is not None
+        else data_root / "hydro_global" / "ENTSOE" / "ElectricityMaps"
+    )
+
+    output_dir = (
+        output_dir.resolve()
+        if output_dir is not None
+        else hydro_results_path / "images" / "historical"
+    )
+
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Hydro results path: %s", hydro_results_path)
+    logger.info("ENTSO-E production path: %s", entsoe_production_path)
+    logger.info("Electricity Maps path: %s", electricity_maps_path)
+    logger.info("Historical output directory: %s", output_dir)
 
     pypsa_networks = load_networks(
         base_path=hydro_results_path,
@@ -1327,8 +1345,8 @@ def main():
     )
 
     hydro_data_nopumped, _, _ = load_entsoe_hydro_data(
-        entsoe_production_path=args.entsoe_production,
-        electricity_maps_path=args.electricity_maps,
+        entsoe_production_path=entsoe_production_path,
+        electricity_maps_path=electricity_maps_path,
     )
 
     pypsa_hydro = extract_hydro_timeseries_from_networks(
@@ -1403,7 +1421,19 @@ def main():
         output_path=output_dir / "historical_kgess_country_map.png",
     )
 
-    print(f"Historical figures saved to: {output_dir}")
+    logger.info("Historical figures saved to: %s", output_dir)
+    
+def main() -> None:
+    setup_logging()
+
+    args = parse_args()
+
+    run_processing_historical(
+        hydro_results_path=args.hydro_results,
+        entsoe_production_path=args.entsoe_production,
+        electricity_maps_path=args.electricity_maps,
+        output_dir=args.output_dir,
+    )
 
 
 if __name__ == "__main__":

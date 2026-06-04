@@ -3,6 +3,7 @@
 from pathlib import Path
 import argparse
 import logging
+import os
 import warnings
 
 import matplotlib
@@ -14,7 +15,11 @@ import numpy as np
 import pandas as pd
 import pypsa
 from matplotlib.lines import Line2D
-import os
+
+from hydro_inflow.utils import setup_logging
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -124,8 +129,6 @@ def get_hydro_results_root():
     ).resolve()
 
 
-DEFAULT_HYDRO_RESULTS_PATH = get_hydro_results_root()
-
 # ============================================================
 # CLI
 # ============================================================
@@ -138,8 +141,8 @@ def parse_args():
     parser.add_argument(
         "--hydro-results",
         type=Path,
-        default=DEFAULT_HYDRO_RESULTS_PATH,
-        help="Path to hydro_results directory.",
+        default=None,
+        help="Path to hydro_results directory. Default: repo_root/hydro_results.",
     )
 
     parser.add_argument(
@@ -1174,19 +1177,33 @@ def make_hydro_representation_figure(
 
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main():
-    args = parse_args()
+def run_processing_hydro_representation(
+    hydro_results_path: Path | None = None,
+    bus_name: str = DEFAULT_BUS_NAME,
+    output_dir: Path | None = None,
+) -> None:
+    hydro_results_path = (
+        hydro_results_path.resolve()
+        if hydro_results_path is not None
+        else get_hydro_results_root()
+    )
 
-    hydro_results_path = args.hydro_results
-    bus_name = args.bus_name
+    output_dir = (
+        output_dir.resolve()
+        if output_dir is not None
+        else hydro_results_path / "images" / "representation"
+    )
 
-    output_dir = args.output_dir or hydro_results_path / "images" / "representation"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     safe_bus_name = bus_name.replace(" ", "_").replace("/", "_")
+
+    logger.info("Hydro results path: %s", hydro_results_path)
+    logger.info("Hydro representation output directory: %s", output_dir)
+    logger.info("Selected bus: %s", bus_name)
 
     make_hydro_representation_figure(
         hydro_results_path=hydro_results_path,
@@ -1194,7 +1211,19 @@ def main():
         output_path=output_dir / f"hydro_representation_{safe_bus_name}.png",
     )
 
-    print(f"Hydro representation figure saved to: {output_dir}")
+    logger.info("Hydro representation figure saved to: %s", output_dir)
+
+
+def main() -> None:
+    setup_logging()
+
+    args = parse_args()
+
+    run_processing_hydro_representation(
+        hydro_results_path=args.hydro_results,
+        bus_name=args.bus_name,
+        output_dir=args.output_dir,
+    )
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 from pathlib import Path
 import argparse
 import logging
+import os
 import warnings
 
 import matplotlib
@@ -15,7 +16,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pypsa
-import os
+
+from hydro_inflow.utils import setup_logging
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -80,8 +85,6 @@ def get_hydro_results_root():
     ).resolve()
 
 
-DEFAULT_HYDRO_RESULTS_PATH = get_hydro_results_root()
-
 # ============================================================
 # CLI
 # ============================================================
@@ -94,7 +97,7 @@ def parse_args():
     parser.add_argument(
         "--hydro-results",
         type=Path,
-        default=DEFAULT_HYDRO_RESULTS_PATH,
+        default=None,
         help="Path to hydro_results directory.",
     )
 
@@ -1659,15 +1662,29 @@ def make_reservoir_spillage_figure(networks, hydro_results_path, output_path):
 
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main():
-    args = parse_args()
+def run_processing_2050(
+    hydro_results_path: Path | None = None,
+    output_dir: Path | None = None,
+) -> None:
+    hydro_results_path = (
+        hydro_results_path.resolve()
+        if hydro_results_path is not None
+        else get_hydro_results_root()
+    )
 
-    hydro_results_path = args.hydro_results
-    output_dir = args.output_dir or hydro_results_path / "images" / "2050"
+    output_dir = (
+        output_dir.resolve()
+        if output_dir is not None
+        else hydro_results_path / "images" / "2050"
+    )
+
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Hydro results path: %s", hydro_results_path)
+    logger.info("2050 output directory: %s", output_dir)
 
     networks = load_2050_networks(hydro_results_path)
 
@@ -1698,7 +1715,18 @@ def main():
         output_path=output_dir / "reservoir_spillage_by_volume_category.png",
     )
 
-    print(f"2050 figures saved to: {output_dir}")
+    logger.info("2050 figures saved to: %s", output_dir)
+
+
+def main() -> None:
+    setup_logging()
+
+    args = parse_args()
+
+    run_processing_2050(
+        hydro_results_path=args.hydro_results,
+        output_dir=args.output_dir,
+    )
 
 
 if __name__ == "__main__":

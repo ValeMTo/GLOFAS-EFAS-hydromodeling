@@ -10,60 +10,10 @@ import shutil
 import subprocess
 import sys
 
+from hydro_inflow.utils import get_repo_root, setup_logging
 
-# ============================================================
-# LOGGING
-# ============================================================
 
 logger = logging.getLogger(__name__)
-
-
-def setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-
-# ============================================================
-# ROOT PATHS
-# ============================================================
-
-def get_repo_root() -> Path:
-    """
-    Return repository root.
-
-    Default:
-        repo root inferred from this file:
-        repo/reproduce/run_postprocessing.py -> repo
-
-    Optional override:
-        HYDRO_REPO_ROOT=/path/to/repo
-    """
-
-    return Path(
-        os.environ.get(
-            "HYDRO_REPO_ROOT",
-            Path(__file__).resolve().parents[1],
-        )
-    ).resolve()
-
-
-def get_hydro_results_root(repo_root: Path) -> Path:
-    """
-    Return hydro_results directory.
-
-    Optional override:
-        HYDRO_RESULTS_ROOT=/path/to/hydro_results
-    """
-
-    return Path(
-        os.environ.get(
-            "HYDRO_RESULTS_ROOT",
-            repo_root / "hydro_results",
-        )
-    ).resolve()
 
 
 # ============================================================
@@ -119,62 +69,23 @@ SCENARIOS_2050 = {
 
 
 # ============================================================
-# CLI
+# ROOT PATHS
 # ============================================================
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Collect PyPSA network outputs and intermediate files into "
-            "hydro_results, then generate all paper figures."
+def get_pypsa_root(repo_root: Path | None = None) -> Path:
+    if repo_root is None:
+        repo_root = get_repo_root()
+
+    return repo_root / "external" / "pypsa-eur-hydro"
+
+
+def get_hydro_results_root(repo_root: Path) -> Path:
+    return Path(
+        os.environ.get(
+            "HYDRO_RESULTS_ROOT",
+            repo_root / "hydro_results",
         )
-    )
-
-    parser.add_argument(
-        "--repo-root",
-        type=Path,
-        default=None,
-        help=(
-            "Repository root. Default: inferred from this script location, "
-            "or HYDRO_REPO_ROOT if set."
-        ),
-    )
-
-    parser.add_argument(
-        "--hydro-results",
-        type=Path,
-        default=None,
-        help=(
-            "hydro_results directory. Default: repo_root/hydro_results, "
-            "or HYDRO_RESULTS_ROOT if set."
-        ),
-    )
-
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite files already present in hydro_results.",
-    )
-
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print planned actions without copying files or running scripts.",
-    )
-
-    parser.add_argument(
-        "--skip-copy",
-        action="store_true",
-        help="Do not copy input files, only run processing scripts.",
-    )
-
-    parser.add_argument(
-        "--skip-processing",
-        action="store_true",
-        help="Only collect input files, do not run processing scripts.",
-    )
-
-    return parser.parse_args()
+    ).resolve()
 
 
 # ============================================================
@@ -232,6 +143,14 @@ def copy_from_candidates(
     if source is None:
         candidate_list = "\n".join(str(path) for path in candidates)
 
+        if dry_run:
+            logger.info(
+                "[dry-run:missing-source] would copy first available source to %s",
+                destination,
+            )
+            logger.info("[dry-run:missing-source] candidates:\n%s", candidate_list)
+            return
+
         raise FileNotFoundError(
             f"No valid source found for target:\n"
             f"{destination}\n\n"
@@ -246,7 +165,7 @@ def copy_from_candidates(
     )
 
 
-def require_file(path: Path, label: str) -> None:
+def require_path(path: Path, label: str) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Missing {label}: {path}")
 
@@ -256,11 +175,11 @@ def require_file(path: Path, label: str) -> None:
 # ============================================================
 
 def build_network_source_candidates(
-    repo_root: Path,
+    pypsa_root: Path,
     scenario_folder_candidates: list[str],
     network_filename: str,
 ) -> list[Path]:
-    results_dir = repo_root / "results"
+    results_dir = pypsa_root / "results"
 
     return [
         results_dir / folder / "networks" / network_filename
@@ -269,14 +188,14 @@ def build_network_source_candidates(
 
 
 def build_resource_source_candidates(
-    repo_root: Path,
+    pypsa_root: Path,
     scenario_folder_candidates: list[str],
     filename: str,
 ) -> list[Path]:
-    resources_dir = repo_root / "resources"
-    results_dir = repo_root / "results"
+    resources_dir = pypsa_root / "resources"
+    results_dir = pypsa_root / "results"
 
-    candidates = []
+    candidates: list[Path] = []
 
     for folder in scenario_folder_candidates:
         candidates.extend(
@@ -295,7 +214,7 @@ def build_resource_source_candidates(
 # ============================================================
 
 def collect_historical_networks(
-    repo_root: Path,
+    pypsa_root: Path,
     hydro_results: Path,
     overwrite: bool = False,
     dry_run: bool = False,
@@ -314,7 +233,7 @@ def collect_historical_networks(
             )
 
             candidates = build_network_source_candidates(
-                repo_root=repo_root,
+                pypsa_root=pypsa_root,
                 scenario_folder_candidates=source_folders,
                 network_filename=HISTORICAL_NETWORK_FILE,
             )
@@ -328,7 +247,7 @@ def collect_historical_networks(
 
 
 def collect_historical_intermediate_files(
-    repo_root: Path,
+    pypsa_root: Path,
     hydro_results: Path,
     overwrite: bool = False,
     dry_run: bool = False,
@@ -347,7 +266,7 @@ def collect_historical_intermediate_files(
 
     copy_from_candidates(
         candidates=build_resource_source_candidates(
-            repo_root=repo_root,
+            pypsa_root=pypsa_root,
             scenario_folder_candidates=pypsa_folders,
             filename="country_shapes.geojson",
         ),
@@ -358,7 +277,7 @@ def collect_historical_intermediate_files(
 
     copy_from_candidates(
         candidates=build_resource_source_candidates(
-            repo_root=repo_root,
+            pypsa_root=pypsa_root,
             scenario_folder_candidates=efas_folders,
             filename="powerplants_s_100.csv",
         ),
@@ -369,7 +288,7 @@ def collect_historical_intermediate_files(
 
     copy_from_candidates(
         candidates=build_resource_source_candidates(
-            repo_root=repo_root,
+            pypsa_root=pypsa_root,
             scenario_folder_candidates=efas_folders,
             filename="regions_onshore_base_s_100.geojson",
         ),
@@ -388,7 +307,7 @@ def collect_historical_intermediate_files(
 # ============================================================
 
 def collect_2050_networks(
-    repo_root: Path,
+    pypsa_root: Path,
     hydro_results: Path,
     overwrite: bool = False,
     dry_run: bool = False,
@@ -401,7 +320,7 @@ def collect_2050_networks(
         )
 
         candidates = build_network_source_candidates(
-            repo_root=repo_root,
+            pypsa_root=pypsa_root,
             scenario_folder_candidates=scenario_cfg["source_candidates"],
             network_filename=FUTURE_NETWORK_FILE,
         )
@@ -415,7 +334,7 @@ def collect_2050_networks(
 
 
 def collect_2050_intermediate_files(
-    repo_root: Path,
+    pypsa_root: Path,
     hydro_results: Path,
     overwrite: bool = False,
     dry_run: bool = False,
@@ -424,7 +343,7 @@ def collect_2050_intermediate_files(
 
     copy_from_candidates(
         candidates=build_resource_source_candidates(
-            repo_root=repo_root,
+            pypsa_root=pypsa_root,
             scenario_folder_candidates=pypsa_folders,
             filename="country_shapes.geojson",
         ),
@@ -435,7 +354,7 @@ def collect_2050_intermediate_files(
 
     copy_from_candidates(
         candidates=build_resource_source_candidates(
-            repo_root=repo_root,
+            pypsa_root=pypsa_root,
             scenario_folder_candidates=pypsa_folders,
             filename="powerplants_s_100.csv",
         ),
@@ -450,7 +369,7 @@ def collect_2050_intermediate_files(
 # ============================================================
 
 def collect_all_inputs(
-    repo_root: Path,
+    pypsa_root: Path,
     hydro_results: Path,
     overwrite: bool = False,
     dry_run: bool = False,
@@ -460,7 +379,7 @@ def collect_all_inputs(
     logger.info("=" * 100)
 
     collect_historical_networks(
-        repo_root=repo_root,
+        pypsa_root=pypsa_root,
         hydro_results=hydro_results,
         overwrite=overwrite,
         dry_run=dry_run,
@@ -471,7 +390,7 @@ def collect_all_inputs(
     logger.info("=" * 100)
 
     collect_historical_intermediate_files(
-        repo_root=repo_root,
+        pypsa_root=pypsa_root,
         hydro_results=hydro_results,
         overwrite=overwrite,
         dry_run=dry_run,
@@ -482,7 +401,7 @@ def collect_all_inputs(
     logger.info("=" * 100)
 
     collect_2050_networks(
-        repo_root=repo_root,
+        pypsa_root=pypsa_root,
         hydro_results=hydro_results,
         overwrite=overwrite,
         dry_run=dry_run,
@@ -493,7 +412,7 @@ def collect_all_inputs(
     logger.info("=" * 100)
 
     collect_2050_intermediate_files(
-        repo_root=repo_root,
+        pypsa_root=pypsa_root,
         hydro_results=hydro_results,
         overwrite=overwrite,
         dry_run=dry_run,
@@ -504,25 +423,30 @@ def collect_all_inputs(
 # PROCESSING SCRIPTS
 # ============================================================
 
-def get_processing_scripts(hydro_results: Path) -> list[Path]:
-    return [
-        hydro_results / "processing_historical.py",
-        hydro_results / "processing_2050.py",
-        hydro_results / "processing_hydro_representation.py",
-    ]
+PROCESSING_MODULES = [
+    "postprocessing_workflow.processing_historical",
+    "postprocessing_workflow.processing_2050",
+    "postprocessing_workflow.processing_hydro_representation",
+]
 
 
-def run_processing_script(
-    script_path: Path,
+def module_to_path(repo_root: Path, module_name: str) -> Path:
+    return repo_root / Path(*module_name.split(".")).with_suffix(".py")
+
+
+def run_processing_module(
+    module_name: str,
     hydro_results: Path,
     repo_root: Path,
     dry_run: bool = False,
 ) -> None:
-    require_file(script_path, "processing script")
+    module_path = module_to_path(repo_root=repo_root, module_name=module_name)
+    require_path(module_path, "processing module")
 
     command = [
         sys.executable,
-        str(script_path),
+        "-m",
+        module_name,
         "--hydro-results",
         str(hydro_results),
     ]
@@ -536,7 +460,7 @@ def run_processing_script(
         return
 
     logger.info("=" * 100)
-    logger.info("Running: %s", script_path.name)
+    logger.info("Running module: %s", module_name)
     logger.info("=" * 100)
 
     subprocess.run(
@@ -552,14 +476,13 @@ def run_all_processing_scripts(
     hydro_results: Path,
     dry_run: bool = False,
 ) -> None:
-    scripts = get_processing_scripts(hydro_results)
+    for module_name in PROCESSING_MODULES:
+        module_path = module_to_path(repo_root=repo_root, module_name=module_name)
+        require_path(module_path, "processing module")
 
-    for script in scripts:
-        require_file(script, "processing script")
-
-    for script in scripts:
-        run_processing_script(
-            script_path=script,
+    for module_name in PROCESSING_MODULES:
+        run_processing_module(
+            module_name=module_name,
             hydro_results=hydro_results,
             repo_root=repo_root,
             dry_run=dry_run,
@@ -590,50 +513,117 @@ def log_final_outputs(hydro_results: Path) -> None:
 
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main() -> None:
-    setup_logging()
+def run_postprocessing(
+    overwrite: bool = False,
+    dry_run: bool = False,
+    skip_copy: bool = False,
+    skip_processing: bool = False,
+    hydro_results: Path | None = None,
+) -> None:
+    repo_root = get_repo_root()
+    pypsa_root = get_pypsa_root(repo_root)
 
-    args = parse_args()
+    if hydro_results is None:
+        hydro_results = get_hydro_results_root(repo_root)
+    else:
+        hydro_results = hydro_results.resolve()
 
-    repo_root = (
-        args.repo_root.resolve()
-        if args.repo_root is not None
-        else get_repo_root()
-    )
-
-    hydro_results = (
-        args.hydro_results.resolve()
-        if args.hydro_results is not None
-        else get_hydro_results_root(repo_root)
-    )
-
-    require_file(repo_root, "repository root")
+    require_path(repo_root, "repository root")
+    require_path(pypsa_root, "PyPSA-Eur repository")
 
     hydro_results.mkdir(parents=True, exist_ok=True)
 
     logger.info("Repository root: %s", repo_root)
+    logger.info("PyPSA-Eur root: %s", pypsa_root)
     logger.info("Hydro results root: %s", hydro_results)
 
-    if not args.skip_copy:
+    if not skip_copy:
         collect_all_inputs(
-            repo_root=repo_root,
+            pypsa_root=pypsa_root,
             hydro_results=hydro_results,
-            overwrite=args.overwrite,
-            dry_run=args.dry_run,
+            overwrite=overwrite,
+            dry_run=dry_run,
         )
 
-    if not args.skip_processing:
+    if not skip_processing:
         run_all_processing_scripts(
             repo_root=repo_root,
             hydro_results=hydro_results,
-            dry_run=args.dry_run,
+            dry_run=dry_run,
         )
 
-    if not args.dry_run:
+    if not dry_run:
         log_final_outputs(hydro_results)
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Collect PyPSA network outputs and intermediate files into "
+            "hydro_results, then generate all paper figures."
+        )
+    )
+
+    parser.add_argument(
+        "--hydro-results",
+        type=Path,
+        default=None,
+        help="hydro_results directory. Default: repo_root/hydro_results.",
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite files already present in hydro_results.",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print planned actions without copying files or running scripts.",
+    )
+
+    parser.add_argument(
+        "--skip-copy",
+        action="store_true",
+        help="Do not copy input files, only run processing scripts.",
+    )
+
+    parser.add_argument(
+        "--skip-processing",
+        action="store_true",
+        help="Only collect input files, do not run processing scripts.",
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use DEBUG logging.",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(level=log_level)
+
+    run_postprocessing(
+        overwrite=args.overwrite,
+        dry_run=args.dry_run,
+        skip_copy=args.skip_copy,
+        skip_processing=args.skip_processing,
+        hydro_results=args.hydro_results,
+    )
 
 
 if __name__ == "__main__":

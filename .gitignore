@@ -225,3 +225,6 @@ data/hydro_workflow/**
 # Python cache
 __pycache__/
 *.py[cod]
+
+# Local postprocessing outputs
+hydro_results/

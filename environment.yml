@@ -85,4 +85,3 @@ dependencies:
       - snakemake-logger-plugin-snkmt==0.1.6
       - pydeflate>=2.3.4
       - hydrostats==1.0.0
-      - git+https://github.com/Asdominet34/saber-hbc.git
