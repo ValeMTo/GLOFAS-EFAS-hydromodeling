@@ -4,8 +4,10 @@ import argparse
 import logging
 
 from hydro_inflow.prepare_hydro_inputs import prepare_and_check_hydro_inputs
-from hydro_inflow.utils import setup_logging
 from hydro_inflow.run_hydro_inflow_framework import run_hydro_inflow_framework
+from hydro_inflow.utils import setup_logging
+from pypsa_workflow.prepare_cutouts import prepare_cutouts
+from pypsa_workflow.run_pypsa_scenarios import run_pypsa_scenarios
 
 
 logger = logging.getLogger(__name__)
@@ -15,6 +17,20 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the GloFAS/EFAS hydromodeling workflow."
     )
+
+    # ============================================================
+    # General
+    # ============================================================
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use DEBUG logging.",
+    )
+
+    # ============================================================
+    # Hydro input preparation
+    # ============================================================
 
     parser.add_argument(
         "--prepare-hydro-inputs",
@@ -91,11 +107,9 @@ def parse_args() -> argparse.Namespace:
         help="Overwrite the downloaded GloHydroRes source CSV if it already exists.",
     )
 
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Use DEBUG logging.",
-    )
+    # ============================================================
+    # Hydro inflow framework
+    # ============================================================
 
     parser.add_argument(
         "--run-hydro-inflow",
@@ -125,9 +139,94 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hydro-dry-run",
         action="store_true",
-        help="Print selected hydro inflow commands without executing them.",
+        help="Print selected hydro inflow functions without executing them.",
     )
-    
+
+    # ============================================================
+    # PyPSA cutouts and scenarios
+    # ============================================================
+
+    parser.add_argument(
+        "--prepare-cutouts",
+        action="store_true",
+        help="Prepare PyPSA-Eur cutouts.",
+    )
+
+    parser.add_argument(
+        "--run-pypsa-scenarios",
+        action="store_true",
+        help="Run PyPSA-Eur scenarios.",
+    )
+
+    parser.add_argument(
+        "--pypsa-group",
+        choices=["historical", "2050", "all"],
+        default="historical",
+        help="PyPSA scenario group to run.",
+    )
+
+    parser.add_argument(
+        "--pypsa-only",
+        default=None,
+        help="Run only one PyPSA scenario or cutout, e.g. pypsa_2015 or cutout_2015.",
+    )
+
+    parser.add_argument(
+        "--pypsa-cores",
+        type=int,
+        default=8,
+        help="Number of Snakemake cores for PyPSA scenarios.",
+    )
+
+    parser.add_argument(
+        "--cutout-cores",
+        type=int,
+        default=16,
+        help="Number of Snakemake cores for cutout preparation.",
+    )
+
+    parser.add_argument(
+        "--pypsa-force",
+        action="store_true",
+        help="Run PyPSA scenario/cutout even if expected output already exists.",
+    )
+
+    parser.add_argument(
+        "--pypsa-dryrun",
+        action="store_true",
+        help="Only print PyPSA workflow actions. Do not copy configs or run Snakemake.",
+    )
+
+    parser.add_argument(
+        "--pypsa-snakemake-dryrun",
+        action="store_true",
+        help="Pass --dryrun to Snakemake for PyPSA workflow.",
+    )
+
+    parser.add_argument(
+        "--pypsa-no-restore-config",
+        action="store_true",
+        help="Do not restore the original PyPSA-Eur active config at the end.",
+    )
+
+    parser.add_argument(
+        "--pypsa-keep-going",
+        action="store_true",
+        help="Pass --keep-going to Snakemake for PyPSA scenarios.",
+    )
+
+    parser.add_argument(
+        "--pypsa-no-rerun-incomplete",
+        action="store_true",
+        help="Do not pass --rerun-incomplete to Snakemake for PyPSA scenarios.",
+    )
+
+    parser.add_argument(
+        "--pypsa-no-printshellcmds",
+        action="store_true",
+        help="Do not pass --printshellcmds to Snakemake for PyPSA scenarios.",
+    )
+
     return parser.parse_args()
 
 
@@ -160,9 +259,41 @@ def main() -> None:
             dry_run=args.hydro_dry_run,
         )
 
-    if not args.prepare_hydro_inputs and not args.run_hydro_inflow:
+    if args.prepare_cutouts:
+        prepare_cutouts(
+            cores=args.cutout_cores,
+            only=args.pypsa_only,
+            force=args.pypsa_force,
+            dryrun=args.pypsa_dryrun,
+            snakemake_dryrun=args.pypsa_snakemake_dryrun,
+            no_restore_config=args.pypsa_no_restore_config,
+        )
+
+    if args.run_pypsa_scenarios:
+        run_pypsa_scenarios(
+            group=args.pypsa_group,
+            only=args.pypsa_only,
+            cores=args.pypsa_cores,
+            force=args.pypsa_force,
+            snakemake_dryrun=args.pypsa_snakemake_dryrun,
+            dryrun=args.pypsa_dryrun,
+            no_restore_config=args.pypsa_no_restore_config,
+            keep_going=args.pypsa_keep_going,
+            rerun_incomplete=not args.pypsa_no_rerun_incomplete,
+            printshellcmds=not args.pypsa_no_printshellcmds,
+            prepare_cutouts_first=False,
+            cutout_cores=args.cutout_cores,
+        )
+
+    if (
+        not args.prepare_hydro_inputs
+        and not args.run_hydro_inflow
+        and not args.prepare_cutouts
+        and not args.run_pypsa_scenarios
+    ):
         logger.info(
-            "No workflow step selected. Use --prepare-hydro-inputs and/or --run-hydro-inflow."
+            "No workflow step selected. Use --prepare-hydro-inputs, "
+            "--run-hydro-inflow, --prepare-cutouts and/or --run-pypsa-scenarios."
         )
 
 

@@ -7,6 +7,8 @@ import logging
 import shutil
 import subprocess
 
+from hydro_inflow.utils import get_repo_root, setup_logging
+
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +22,11 @@ class CutoutScenario:
     archive_file: Path
 
 
-def get_repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+def get_pypsa_root(repo_root: Path | None = None) -> Path:
+    if repo_root is None:
+        repo_root = get_repo_root()
+
+    return repo_root / "external" / "pypsa-eur-hydro"
 
 
 def backup_active_config(active_config: Path, dryrun: bool = False) -> Path | None:
@@ -33,7 +38,7 @@ def backup_active_config(active_config: Path, dryrun: bool = False) -> Path | No
         active_config.suffix + ".before_prepare_cutouts.bak"
     )
 
-    logger.info("Backing up active config:")
+    logger.info("Backing up active PyPSA config:")
     logger.info("  from: %s", active_config)
     logger.info("  to:   %s", backup)
 
@@ -59,7 +64,7 @@ def restore_active_config(
         logger.warning("Backup config does not exist, cannot restore: %s", backup_config)
         return
 
-    logger.info("Restoring original active config:")
+    logger.info("Restoring original active PyPSA config:")
     logger.info("  from: %s", backup_config)
     logger.info("  to:   %s", active_config)
 
@@ -84,11 +89,14 @@ def copy_config_to_active_config(
         shutil.copy2(scenario_config, active_config)
 
 
-def build_cutout_scenarios(repo_root: Path) -> list[CutoutScenario]:
+def build_cutout_scenarios(
+    repo_root: Path,
+    pypsa_root: Path,
+) -> list[CutoutScenario]:
     cutout_config_dir = repo_root / "config" / "cutouts"
 
-    build_dir = repo_root / "data" / "cutout" / "build" / "unknown"
-    archive_dir = repo_root / "data" / "cutout" / "archive" / "v1.0"
+    build_dir = pypsa_root / "data" / "cutout" / "build" / "unknown"
+    archive_dir = pypsa_root / "data" / "cutout" / "archive" / "v1.0"
 
     scenarios: list[CutoutScenario] = []
 
@@ -111,20 +119,36 @@ def build_cutout_scenarios(repo_root: Path) -> list[CutoutScenario]:
 def run_command(command: list[str], cwd: Path, dryrun: bool = False) -> None:
     logger.info("=" * 80)
     logger.info("Running command: %s", " ".join(command))
+    logger.info("Working directory: %s", cwd)
     logger.info("=" * 80)
 
     if dryrun:
         return
 
     subprocess.run(command, cwd=cwd, check=True)
-    
-def ensure_cutout_tmpdir(repo_root: Path, dryrun: bool = False) -> None:
-    tmpdir = repo_root / "cutouts_tmp"
+
+
+def ensure_cutout_tmpdir(pypsa_root: Path, dryrun: bool = False) -> None:
+    tmpdir = pypsa_root / "cutouts_tmp"
 
     logger.info("Ensuring cutout temporary directory exists: %s", tmpdir)
 
     if not dryrun:
         tmpdir.mkdir(parents=True, exist_ok=True)
+
+
+def clean_cutout_tmpdir(pypsa_root: Path, dryrun: bool = False) -> None:
+    tmpdir = pypsa_root / "cutouts_tmp"
+
+    if not tmpdir.exists():
+        logger.info("Temporary cutout directory already absent: %s", tmpdir)
+        return
+
+    logger.info("Removing temporary cutout directory: %s", tmpdir)
+
+    if not dryrun:
+        shutil.rmtree(tmpdir)
+
 
 def copy_cutout_to_archive(
     build_file: Path,
@@ -147,7 +171,8 @@ def copy_cutout_to_archive(
 
     if not dryrun:
         shutil.copy2(build_file, archive_file)
-        
+
+
 def remove_file(path: Path, dryrun: bool = False) -> None:
     if not path.exists():
         logger.info("File already absent, nothing to clean: %s", path)
@@ -159,22 +184,9 @@ def remove_file(path: Path, dryrun: bool = False) -> None:
         path.unlink()
 
 
-def clean_cutout_tmpdir(repo_root: Path, dryrun: bool = False) -> None:
-    tmpdir = repo_root / "cutouts_tmp"
-
-    if not tmpdir.exists():
-        logger.info("Temporary cutout directory already absent: %s", tmpdir)
-        return
-
-    logger.info("Removing temporary cutout directory: %s", tmpdir)
-
-    if not dryrun:
-        shutil.rmtree(tmpdir)
-
-
 def run_cutout_scenario(
     scenario: CutoutScenario,
-    repo_root: Path,
+    pypsa_root: Path,
     active_config: Path,
     cores: int,
     force: bool,
@@ -214,17 +226,21 @@ def run_cutout_scenario(
 
     if snakemake_dryrun:
         command.append("--dryrun")
-        
+
     ensure_cutout_tmpdir(
-        repo_root=repo_root,
+        pypsa_root=pypsa_root,
         dryrun=dryrun,
     )
 
     run_command(
         command=command,
-        cwd=repo_root,
+        cwd=pypsa_root,
         dryrun=dryrun,
     )
+    
+    if dryrun:
+        logger.info("Dryrun enabled, skipping archive copy and cleanup.")
+        return
 
     if snakemake_dryrun:
         logger.info("Snakemake dryrun enabled, skipping archive copy.")
@@ -243,7 +259,7 @@ def run_cutout_scenario(
     )
 
     clean_cutout_tmpdir(
-        repo_root=repo_root,
+        pypsa_root=pypsa_root,
         dryrun=dryrun,
     )
 
@@ -264,6 +280,69 @@ def filter_scenarios(
     return selected
 
 
+def prepare_cutouts(
+    cores: int = 16,
+    only: str | None = None,
+    force: bool = False,
+    dryrun: bool = False,
+    snakemake_dryrun: bool = False,
+    no_restore_config: bool = False,
+    active_config_relative_path: str = "config/config.yaml",
+) -> None:
+    repo_root = get_repo_root()
+    pypsa_root = get_pypsa_root(repo_root)
+
+    if not pypsa_root.exists():
+        raise FileNotFoundError(f"Missing PyPSA-Eur repository: {pypsa_root}")
+
+    active_config = pypsa_root / active_config_relative_path
+
+    scenarios = filter_scenarios(
+        scenarios=build_cutout_scenarios(
+            repo_root=repo_root,
+            pypsa_root=pypsa_root,
+        ),
+        only=only,
+    )
+
+    logger.info("Repository root: %s", repo_root)
+    logger.info("PyPSA-Eur root: %s", pypsa_root)
+    logger.info("Active PyPSA config: %s", active_config)
+    logger.info("Selected cutout scenarios: %s", [scenario.name for scenario in scenarios])
+
+    backup_config = backup_active_config(
+        active_config=active_config,
+        dryrun=dryrun,
+    )
+
+    try:
+        for scenario in scenarios:
+            run_cutout_scenario(
+                scenario=scenario,
+                pypsa_root=pypsa_root,
+                active_config=active_config,
+                cores=cores,
+                force=force,
+                dryrun=dryrun,
+                snakemake_dryrun=snakemake_dryrun,
+            )
+    finally:
+        if dryrun:
+            logger.info("Dryrun mode: active config was not modified, skipping restore.")
+        elif no_restore_config:
+            logger.info(
+                "Leaving last cutout config active because no_restore_config=True."
+            )
+        else:
+            restore_active_config(
+                backup_config=backup_config,
+                active_config=active_config,
+                dryrun=False,
+            )
+
+    logger.info("Cutout preparation completed.")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -282,7 +361,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--active-config",
         default="config/config.yaml",
-        help="Path to active PyPSA-Eur config file.",
+        help="Path to active PyPSA-Eur config file relative to external/pypsa-eur-hydro.",
     )
 
     parser.add_argument(
@@ -312,63 +391,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-restore-config",
         action="store_true",
-        help="Do not restore the original config at the end.",
+        help="Do not restore the original PyPSA-Eur config at the end.",
+    )
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use DEBUG logging.",
     )
 
     return parser.parse_args()
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
-    )
-
     args = parse_args()
 
-    repo_root = get_repo_root()
-    active_config = repo_root / args.active_config
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(level=log_level)
 
-    scenarios = filter_scenarios(
-        scenarios=build_cutout_scenarios(repo_root),
+    prepare_cutouts(
+        cores=args.cores,
         only=args.only,
-    )
-
-    logger.info("Repository root: %s", repo_root)
-    logger.info("Active config: %s", active_config)
-    logger.info("Selected cutout scenarios: %s", [scenario.name for scenario in scenarios])
-
-    backup_config = backup_active_config(
-        active_config=active_config,
+        force=args.force,
         dryrun=args.dryrun,
+        snakemake_dryrun=args.snakemake_dryrun,
+        no_restore_config=args.no_restore_config,
+        active_config_relative_path=args.active_config,
     )
-
-    try:
-        for scenario in scenarios:
-            run_cutout_scenario(
-                scenario=scenario,
-                repo_root=repo_root,
-                active_config=active_config,
-                cores=args.cores,
-                force=args.force,
-                dryrun=args.dryrun,
-                snakemake_dryrun=args.snakemake_dryrun,
-            )
-    finally:
-        if args.dryrun:
-            logger.info("Dryrun mode: active config was not modified, skipping restore.")
-        elif args.no_restore_config:
-            logger.info(
-                "Leaving last cutout config active because --no-restore-config was set."
-            )
-        else:
-            restore_active_config(
-                backup_config=backup_config,
-                active_config=active_config,
-                dryrun=False,
-            )
-
-    logger.info("Cutout preparation completed.")
 
 
 if __name__ == "__main__":

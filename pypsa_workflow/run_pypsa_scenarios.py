@@ -6,7 +6,9 @@ import argparse
 import logging
 import shutil
 import subprocess
-import sys
+
+from hydro_inflow.utils import get_repo_root, setup_logging
+from pypsa_workflow.prepare_cutouts import prepare_cutouts
 
 
 logger = logging.getLogger(__name__)
@@ -20,13 +22,17 @@ class Scenario:
     mode: str
 
 
-def get_repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+def get_pypsa_root(repo_root: Path | None = None) -> Path:
+    if repo_root is None:
+        repo_root = get_repo_root()
+
+    return repo_root / "external" / "pypsa-eur-hydro"
 
 
 def run_command(command: list[str], cwd: Path, dryrun: bool = False) -> None:
     logger.info("=" * 80)
     logger.info("Running command: %s", " ".join(command))
+    logger.info("Working directory: %s", cwd)
     logger.info("=" * 80)
 
     if dryrun:
@@ -34,35 +40,6 @@ def run_command(command: list[str], cwd: Path, dryrun: bool = False) -> None:
 
     subprocess.run(command, cwd=cwd, check=True)
 
-def prepare_cutouts(
-    repo_root: Path,
-    cores: int,
-    dryrun: bool,
-    snakemake_dryrun: bool,
-) -> None:
-    script_path = repo_root / "reproduce" / "prepare_cutouts.py"
-
-    if not script_path.exists():
-        raise FileNotFoundError(f"Missing cutout preparation script: {script_path}")
-
-    command = [
-        sys.executable,
-        str(script_path),
-        "--cores",
-        str(cores),
-    ]
-
-    if dryrun:
-        command.append("--dryrun")
-
-    if snakemake_dryrun:
-        command.append("--snakemake-dryrun")
-
-    run_command(
-        command=command,
-        cwd=repo_root,
-        dryrun=False,
-    )
 
 def copy_config_to_active_config(
     scenario_config: Path,
@@ -74,7 +51,7 @@ def copy_config_to_active_config(
 
     active_config.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Activating scenario config:")
+    logger.info("Activating PyPSA scenario config:")
     logger.info("  from: %s", scenario_config)
     logger.info("  to:   %s", active_config)
 
@@ -86,12 +63,14 @@ def copy_config_to_active_config(
 
 def backup_active_config(active_config: Path, dryrun: bool = False) -> Path | None:
     if not active_config.exists():
-        logger.warning("No active config found to back up: %s", active_config)
+        logger.warning("No active PyPSA config found to back up: %s", active_config)
         return None
 
-    backup = active_config.with_suffix(active_config.suffix + ".before_run_pypsa_scenarios.bak")
+    backup = active_config.with_suffix(
+        active_config.suffix + ".before_run_pypsa_scenarios.bak"
+    )
 
-    logger.info("Backing up active config:")
+    logger.info("Backing up active PyPSA config:")
     logger.info("  from: %s", active_config)
     logger.info("  to:   %s", backup)
 
@@ -113,7 +92,7 @@ def restore_active_config(
         logger.warning("Backup config does not exist, cannot restore: %s", backup_config)
         return
 
-    logger.info("Restoring original active config:")
+    logger.info("Restoring original active PyPSA config:")
     logger.info("  from: %s", backup_config)
     logger.info("  to:   %s", active_config)
 
@@ -124,7 +103,6 @@ def restore_active_config(
 def build_scenarios(repo_root: Path) -> list[Scenario]:
     scenarios: list[Scenario] = []
 
-    # Historical electricity-only runs.
     for year in range(2015, 2020):
         scenarios.append(
             Scenario(
@@ -155,7 +133,6 @@ def build_scenarios(repo_root: Path) -> list[Scenario]:
             )
         )
 
-    # 2050 sector-coupled runs.
     scenarios.extend(
         [
             Scenario(
@@ -248,7 +225,7 @@ def build_snakemake_command(
 
 def run_scenario(
     scenario: Scenario,
-    repo_root: Path,
+    pypsa_root: Path,
     active_config: Path,
     cores: int,
     force: bool,
@@ -258,7 +235,7 @@ def run_scenario(
     printshellcmds: bool,
     dryrun: bool,
 ) -> None:
-    target_path = repo_root / scenario.target
+    target_path = pypsa_root / scenario.target
 
     logger.info("")
     logger.info("#" * 80)
@@ -289,9 +266,87 @@ def run_scenario(
 
     run_command(
         command=command,
-        cwd=repo_root,
+        cwd=pypsa_root,
         dryrun=dryrun,
     )
+
+
+def run_pypsa_scenarios(
+    group: str = "historical",
+    only: str | None = None,
+    cores: int = 8,
+    active_config_relative_path: str = "config/config.yaml",
+    force: bool = False,
+    snakemake_dryrun: bool = False,
+    dryrun: bool = False,
+    no_restore_config: bool = False,
+    keep_going: bool = False,
+    rerun_incomplete: bool = True,
+    printshellcmds: bool = True,
+    prepare_cutouts_first: bool = False,
+    cutout_cores: int = 16,
+) -> None:
+    repo_root = get_repo_root()
+    pypsa_root = get_pypsa_root(repo_root)
+
+    if not pypsa_root.exists():
+        raise FileNotFoundError(f"Missing PyPSA-Eur repository: {pypsa_root}")
+
+    active_config = pypsa_root / active_config_relative_path
+
+    scenarios = build_scenarios(repo_root)
+    selected_scenarios = filter_scenarios(
+        scenarios=scenarios,
+        only=only,
+        group=group,
+    )
+
+    logger.info("Repository root: %s", repo_root)
+    logger.info("PyPSA-Eur root: %s", pypsa_root)
+    logger.info("Active PyPSA config: %s", active_config)
+    logger.info("Selected scenarios: %s", [scenario.name for scenario in selected_scenarios])
+
+    if prepare_cutouts_first:
+        prepare_cutouts(
+            cores=cutout_cores,
+            dryrun=dryrun,
+            snakemake_dryrun=snakemake_dryrun,
+        )
+
+    backup_config = backup_active_config(
+        active_config=active_config,
+        dryrun=dryrun,
+    )
+
+    try:
+        for scenario in selected_scenarios:
+            run_scenario(
+                scenario=scenario,
+                pypsa_root=pypsa_root,
+                active_config=active_config,
+                cores=cores,
+                force=force,
+                snakemake_dryrun=snakemake_dryrun,
+                keep_going=keep_going,
+                rerun_incomplete=rerun_incomplete,
+                printshellcmds=printshellcmds,
+                dryrun=dryrun,
+            )
+    finally:
+        if dryrun:
+            logger.info("Dryrun mode: active config was not modified, skipping restore.")
+        elif no_restore_config:
+            logger.info(
+                "Leaving last scenario config active because no_restore_config=True."
+            )
+        else:
+            restore_active_config(
+                backup_config=backup_config,
+                active_config=active_config,
+                dryrun=False,
+            )
+
+    logger.info("Selected PyPSA-Eur scenarios completed.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -302,7 +357,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prepare-cutouts",
         action="store_true",
-        help="Run reproduce/prepare_cutouts.py before launching PyPSA-Eur scenarios.",
+        help="Run pypsa_workflow.prepare_cutouts before launching PyPSA-Eur scenarios.",
     )
 
     parser.add_argument(
@@ -311,7 +366,7 @@ def parse_args() -> argparse.Namespace:
         default=16,
         help="Number of cores used for cutout preparation.",
     )
-    
+
     parser.add_argument(
         "--group",
         choices=["historical", "2050", "all"],
@@ -335,7 +390,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--active-config",
         default="config/config.yaml",
-        help="Path to the active PyPSA-Eur config file to overwrite.",
+        help="Path to active PyPSA-Eur config relative to external/pypsa-eur-hydro.",
     )
 
     parser.add_argument(
@@ -359,7 +414,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-restore-config",
         action="store_true",
-        help="Do not restore the original active config at the end.",
+        help="Do not restore the original active PyPSA-Eur config at the end.",
     )
 
     parser.add_argument(
@@ -380,71 +435,36 @@ def parse_args() -> argparse.Namespace:
         help="Do not pass --printshellcmds to Snakemake.",
     )
 
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Use DEBUG logging.",
+    )
+
     return parser.parse_args()
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
-    )
-
     args = parse_args()
 
-    repo_root = get_repo_root()
-    active_config = repo_root / args.active_config
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    setup_logging(level=log_level)
 
-    scenarios = build_scenarios(repo_root)
-    selected_scenarios = filter_scenarios(
-        scenarios=scenarios,
-        only=args.only,
+    run_pypsa_scenarios(
         group=args.group,
-    )
-
-    logger.info("Repository root: %s", repo_root)
-    logger.info("Active config: %s", active_config)
-    logger.info("Selected scenarios: %s", [scenario.name for scenario in selected_scenarios])
-
-    if args.prepare_cutouts:
-        prepare_cutouts(
-            repo_root=repo_root,
-            cores=args.cutout_cores,
-            dryrun=args.dryrun,
-            snakemake_dryrun=args.snakemake_dryrun,
-        )
-
-    backup_config = backup_active_config(
-        active_config=active_config,
+        only=args.only,
+        cores=args.cores,
+        active_config_relative_path=args.active_config,
+        force=args.force,
+        snakemake_dryrun=args.snakemake_dryrun,
         dryrun=args.dryrun,
+        no_restore_config=args.no_restore_config,
+        keep_going=args.keep_going,
+        rerun_incomplete=not args.no_rerun_incomplete,
+        printshellcmds=not args.no_printshellcmds,
+        prepare_cutouts_first=args.prepare_cutouts,
+        cutout_cores=args.cutout_cores,
     )
-
-    try:
-        for scenario in selected_scenarios:
-            run_scenario(
-                scenario=scenario,
-                repo_root=repo_root,
-                active_config=active_config,
-                cores=args.cores,
-                force=args.force,
-                snakemake_dryrun=args.snakemake_dryrun,
-                keep_going=args.keep_going,
-                rerun_incomplete=not args.no_rerun_incomplete,
-                printshellcmds=not args.no_printshellcmds,
-                dryrun=args.dryrun,
-            )
-    finally:
-        if args.dryrun:
-            logger.info("Dryrun mode: active config was not modified, skipping restore.")
-        elif args.no_restore_config:
-            logger.info("Leaving last scenario config active because --no-restore-config was set.")
-        else:
-            restore_active_config(
-                backup_config=backup_config,
-                active_config=active_config,
-                dryrun=False,
-            )
-
-    logger.info("Selected PyPSA-Eur scenarios completed.")
 
 
 if __name__ == "__main__":
