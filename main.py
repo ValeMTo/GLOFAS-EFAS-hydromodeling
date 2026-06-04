@@ -5,6 +5,7 @@ import logging
 
 from hydro_inflow.prepare_hydro_inputs import prepare_and_check_hydro_inputs
 from hydro_inflow.utils import setup_logging
+from hydro_inflow.run_hydro_inflow_framework import run_hydro_inflow_framework
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,37 @@ def parse_args() -> argparse.Namespace:
         help="Use DEBUG logging.",
     )
 
+    parser.add_argument(
+        "--run-hydro-inflow",
+        action="store_true",
+        help="Run the hydro inflow framework.",
+    )
+
+    parser.add_argument(
+        "--hydro-dataset",
+        choices=["glofas", "efas", "all"],
+        default="all",
+        help="Hydrological dataset to process in the hydro inflow framework.",
+    )
+
+    parser.add_argument(
+        "--hydro-start-from",
+        default=None,
+        help="Optional hydro inflow step script name to start from.",
+    )
+
+    parser.add_argument(
+        "--hydro-stop-after",
+        default=None,
+        help="Optional hydro inflow step script name to stop after.",
+    )
+
+    parser.add_argument(
+        "--hydro-dry-run",
+        action="store_true",
+        help="Print selected hydro inflow commands without executing them.",
+    )
+    
     return parser.parse_args()
 
 
@@ -119,8 +151,19 @@ def main() -> None:
             overwrite_static=args.overwrite_static,
             overwrite_glohydrores=args.overwrite_glohydrores,
         )
-    else:
-        logger.info("No workflow step selected. Use --prepare-hydro-inputs.")
+
+    if args.run_hydro_inflow:
+        run_hydro_inflow_framework(
+            dataset=args.hydro_dataset,
+            start_from=args.hydro_start_from,
+            stop_after=args.hydro_stop_after,
+            dry_run=args.hydro_dry_run,
+        )
+
+    if not args.prepare_hydro_inputs and not args.run_hydro_inflow:
+        logger.info(
+            "No workflow step selected. Use --prepare-hydro-inputs and/or --run-hydro-inflow."
+        )
 
 
 if __name__ == "__main__":

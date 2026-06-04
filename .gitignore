@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Hydro workflow local data and generated outputs
+data/hydro_workflow/**
+!data/hydro_workflow/
+!data/hydro_workflow/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]

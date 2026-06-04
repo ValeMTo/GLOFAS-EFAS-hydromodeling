@@ -66,7 +66,7 @@ def get_config() -> dict:
     entsoe_hydro_hourly_dir = entsoe_hydro_dir / "Production"
     electricity_maps_dir = entsoe_hydro_dir / "ElectricityMaps"
 
-    pypsa_inflow_netcdf_dir = repo_root / "data" / "hydro"
+    pypsa_inflow_netcdf_dir = repo_root / "data" / "pypsa"
     paper_figures_dir = repo_root / "hydro_results" / "images"
 
     common = {
