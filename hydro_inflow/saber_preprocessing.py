@@ -11,43 +11,18 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from hydro_config import get_config, log_config_summary
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config, log_config_summary
+from hydro_inflow.utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
 
-CFG = get_config()
-
 # ============================================================
-# CONFIGURATION
+# CONSTANTS
 # ============================================================
 
-# Plant outputs from hydro-plant extraction script
-PLANT_MAP_PATH = CFG["rivid_map_output_path"]
-HINDCAST_PLANTS_ZARR = CFG["zarr_output_path"]
-
-# Station outputs from GRDC-to-drain script
-STATION_BASE_DIR = CFG["base_output_dir"]
-
-STATION_MODEL_MAP_PATH = STATION_BASE_DIR / "station_model_map.csv"
-GAUGE_TABLE_PATH = STATION_BASE_DIR / "workdir" / "tables" / "gauge_table_all.csv"
-GAUGE_QSIM_DIR = STATION_BASE_DIR / CFG["station_qsim_dir_name"]
-
-# Final target outputs
-OUTPUT_BASE_DIR = STATION_BASE_DIR
-WORKDIR_TABLES = OUTPUT_BASE_DIR / "workdir" / "tables"
-
-TARGET_MODEL_MAP_PATH = WORKDIR_TABLES / "target_model_map.csv"
-MISSING_GAUGE_QSIM_PATH = WORKDIR_TABLES / "missing_gauge_qsim_in_hindcast_target.csv"
-CLUSTER_DATA_PATH = WORKDIR_TABLES / "cluster_data.parquet"
-
-HINDCAST_TARGET_ZARR = OUTPUT_BASE_DIR / "hindcast_target.zarr"
-
-# FDC / clustering parameters
 N_PCTL = 100
 MIN_VALID_VALUES_FOR_CLUSTER = 100
-
 
 # ============================================================
 # HELPERS
@@ -485,58 +460,89 @@ def save_outputs(
     targets: pd.DataFrame,
     ds_target: xr.Dataset,
     missing_df: pd.DataFrame,
+    workdir_tables: Path,
+    output_base_dir: Path,
+    target_model_map_path: Path,
+    hindcast_target_zarr: Path,
+    missing_gauge_qsim_path: Path,
 ) -> None:
-    WORKDIR_TABLES.mkdir(parents=True, exist_ok=True)
-    OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    workdir_tables.mkdir(parents=True, exist_ok=True)
+    output_base_dir.mkdir(parents=True, exist_ok=True)
 
-    targets.to_csv(TARGET_MODEL_MAP_PATH, index=False)
-    logger.info("Target model map saved: %s", TARGET_MODEL_MAP_PATH)
+    targets.to_csv(target_model_map_path, index=False)
+    logger.info("Target model map saved: %s", target_model_map_path)
 
-    ds_target.to_zarr(HINDCAST_TARGET_ZARR, mode="w")
-    logger.info("Hindcast target zarr saved: %s", HINDCAST_TARGET_ZARR)
+    ds_target.to_zarr(hindcast_target_zarr, mode="w")
+    logger.info("Hindcast target zarr saved: %s", hindcast_target_zarr)
 
     if not missing_df.empty:
-        missing_df.to_csv(MISSING_GAUGE_QSIM_PATH, index=False)
-        logger.warning("Missing Qsim report saved: %s", MISSING_GAUGE_QSIM_PATH)
+        missing_df.to_csv(missing_gauge_qsim_path, index=False)
+        logger.warning("Missing Qsim report saved: %s", missing_gauge_qsim_path)
     else:
         logger.info("No missing Qsim report needed.")
 
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main() -> None:
-    setup_logging()
-    log_config_summary(CFG)
+def run_saber_preprocessing(cfg: dict | None = None) -> None:
+    cfg = cfg or get_config()
+
+    log_config_summary(cfg)
+
+    plant_map_path = cfg["rivid_map_output_path"]
+    hindcast_plants_zarr = cfg["zarr_output_path"]
+
+    output_base_dir = cfg["base_output_dir"]
+    workdir_tables = cfg["saber_workdir"] / "tables"
+
+    station_model_map_path = cfg["station_model_map_path"]
+    gauge_table_path = cfg["gauge_table_path"]
+    gauge_qsim_dir = cfg["station_qsim_dir"]
+
+    target_model_map_path = cfg["target_model_map_path"]
+    missing_gauge_qsim_path = cfg["missing_gauge_qsim_path"]
+    cluster_data_path = cfg["cluster_data_path"]
+    hindcast_target_zarr = cfg["target_hindcast_zarr_path"]
 
     targets = build_target_model_map(
-        plant_map_path=PLANT_MAP_PATH,
-        gauge_table_path=GAUGE_TABLE_PATH,
-        station_model_map_path=STATION_MODEL_MAP_PATH,
+        plant_map_path=plant_map_path,
+        gauge_table_path=gauge_table_path,
+        station_model_map_path=station_model_map_path,
     )
 
     ds_target, missing_df = build_hindcast_target_dataset(
         targets=targets,
-        hindcast_plants_zarr=HINDCAST_PLANTS_ZARR,
-        plant_map_path=PLANT_MAP_PATH,
-        gauge_qsim_dir=GAUGE_QSIM_DIR,
+        hindcast_plants_zarr=hindcast_plants_zarr,
+        plant_map_path=plant_map_path,
+        gauge_qsim_dir=gauge_qsim_dir,
     )
 
     save_outputs(
         targets=targets,
         ds_target=ds_target,
         missing_df=missing_df,
+        workdir_tables=workdir_tables,
+        output_base_dir=output_base_dir,
+        target_model_map_path=target_model_map_path,
+        hindcast_target_zarr=hindcast_target_zarr,
+        missing_gauge_qsim_path=missing_gauge_qsim_path,
     )
 
     build_cluster_data(
-        hindcast_target_zarr=HINDCAST_TARGET_ZARR,
-        cluster_data_path=CLUSTER_DATA_PATH,
+        hindcast_target_zarr=hindcast_target_zarr,
+        cluster_data_path=cluster_data_path,
         n_pctl=N_PCTL,
         min_valid_values=MIN_VALID_VALUES_FOR_CLUSTER,
     )
 
     logger.info("SABER preprocessing completed.")
+
+
+def main() -> None:
+    setup_logging()
+    run_saber_preprocessing()
 
 
 if __name__ == "__main__":

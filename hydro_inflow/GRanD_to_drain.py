@@ -14,25 +14,15 @@ import geopandas as gpd
 import xarray as xr
 from scipy.spatial import cKDTree
 
-from hydro_config import get_config, log_config_summary
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config, log_config_summary
+from hydro_inflow.utils import approx_dist_km, setup_logging
 
 
 logger = logging.getLogger(__name__)
 
-CFG = get_config()
-
 # ============================================================
-# CONFIGURATION
+# CONSTANTS
 # ============================================================
-
-GRAND_PATH = CFG["grand_path"]
-DRAIN_TABLE_PATH = CFG["drain_table_path"]
-RIVER_REFERENCE_PATH = CFG["river_reference_path"]
-
-RIVER_VAR_NAME = CFG["hydro_var_name"]
-
-REGULATE_TABLE_OUTPUT_PATH = CFG["regulate_table_output_path"]
 
 CAPACITY_THRESHOLD_MCM = 250.0
 
@@ -141,19 +131,6 @@ EUROPE_COUNTRY_NAME_TO_ISO2 = {
     "uk": "GB",
     "great britain": "GB",
 }
-
-
-# ============================================================
-# GEOGRAPHIC UTILS
-# ============================================================
-
-def approx_dist_km(lon: float, lat: float, lon2, lat2):
-    dlon = lon2 - lon
-    dlat = lat2 - lat
-    dx_km = dlon * 111.0 * np.cos(np.deg2rad(lat))
-    dy_km = dlat * 111.0
-    return np.sqrt(dx_km**2 + dy_km**2)
-
 
 # ============================================================
 # LOADERS
@@ -764,36 +741,45 @@ def build_regulate_table(
 # SAVE
 # ============================================================
 
-def save_outputs(regulate_table: pd.DataFrame) -> None:
-    REGULATE_TABLE_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+def save_outputs(
+    regulate_table: pd.DataFrame,
+    regulate_table_output_path: Path,
+) -> None:
+    regulate_table_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    regulate_table.to_csv(REGULATE_TABLE_OUTPUT_PATH, index=False)
+    regulate_table.to_csv(regulate_table_output_path, index=False)
 
-    logger.info("Regulate table saved: %s", REGULATE_TABLE_OUTPUT_PATH)
-
+    logger.info("Regulate table saved: %s", regulate_table_output_path)
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main() -> None:
-    setup_logging()
-    log_config_summary(CFG)
+def run_grand_to_drain(cfg: dict | None = None) -> None:
+    cfg = cfg or get_config()
+
+    log_config_summary(cfg)
 
     t0 = time.time()
 
+    grand_path = cfg["grand_path"]
+    drain_table_path = cfg["drain_table_path"]
+    river_reference_path = cfg["river_reference_path"]
+    river_var_name = cfg["hydro_var_name"]
+    regulate_table_output_path = cfg["regulate_table_output_path"]
+
     major_reservoirs = load_grand_reservoirs(
-        grand_path=GRAND_PATH,
+        grand_path=grand_path,
         capacity_threshold_mcm=CAPACITY_THRESHOLD_MCM,
         allowed_iso2=ALLOWED_ISO2,
     )
 
-    df_drain = load_drain_table(DRAIN_TABLE_PATH)
+    df_drain = load_drain_table(drain_table_path)
 
-    logger.debug("Opening river reference: %s", RIVER_REFERENCE_PATH)
+    logger.debug("Opening river reference: %s", river_reference_path)
 
-    with xr.open_dataset(RIVER_REFERENCE_PATH) as ds:
-        river_da = ds[RIVER_VAR_NAME]
+    with xr.open_dataset(river_reference_path) as ds:
+        river_da = ds[river_var_name]
 
         regulate_table = build_regulate_table(
             major_reservoirs=major_reservoirs,
@@ -806,10 +792,18 @@ def main() -> None:
             log_every=LOG_EVERY,
         )
 
-    save_outputs(regulate_table=regulate_table)
+    save_outputs(
+        regulate_table=regulate_table,
+        regulate_table_output_path=regulate_table_output_path,
+    )
 
     logger.info("GRanD-to-drain workflow completed.")
     logger.debug("Total time: %.1f s", time.time() - t0)
+
+
+def main() -> None:
+    setup_logging()
+    run_grand_to_drain()
 
 
 if __name__ == "__main__":

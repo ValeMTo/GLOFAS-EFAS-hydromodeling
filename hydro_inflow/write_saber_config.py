@@ -5,15 +5,15 @@ import logging
 
 import yaml
 
-from hydro_config import get_config
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config
+from hydro_inflow.utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
 
 
-def build_saber_config() -> dict:
-    cfg = get_config()
+def build_saber_config(cfg: dict | None = None) -> dict:
+    cfg = cfg or get_config()
 
     return {
         "workdir": str(cfg["saber_workdir"]),
@@ -29,20 +29,26 @@ def build_saber_config() -> dict:
     }
 
 
-def main() -> None:
-    setup_logging()
+def write_saber_config(cfg: dict | None = None) -> Path:
+    cfg = cfg or get_config()
 
-    cfg = get_config()
-    saber_config = build_saber_config()
+    saber_config = build_saber_config(cfg)
 
     out_path = Path(cfg["saber_config_path"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with out_path.open("w") as file:
+    with out_path.open("w", encoding="utf-8") as file:
         yaml.safe_dump(saber_config, file, sort_keys=False)
 
     logger.info("SABER config written: %s", out_path)
     logger.debug("SABER config content: %s", saber_config)
+
+    return out_path
+
+
+def main() -> None:
+    setup_logging()
+    write_saber_config()
 
 
 if __name__ == "__main__":

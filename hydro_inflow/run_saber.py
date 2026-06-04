@@ -19,31 +19,16 @@ from saber.table import init, mp_prop_gauges, mp_prop_regulated
 from saber.assign import mp_assign
 from saber.saber import mp_saber
 
-from hydro_config import get_config, log_config_summary
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config, log_config_summary
+from hydro_inflow.utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
-
-CFG = get_config()
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-CONFIG_PATH = CFG["saber_config_path"]
 
 # None = read automatically from workdir/tables/cluster_metrics.csv column 'knee'.
 # If the file/column/value is missing, DEFAULT_N_CLUSTERS is used.
 N_CLUSTERS = None
 DEFAULT_N_CLUSTERS = 5
-
-# Diagnostic plot only. Not a paper figure.
-DO_PLOT = os.environ.get("HYDRO_MAKE_DIAGNOSTIC_PLOTS", "0") == "1"
-SHOW_PLOT = os.environ.get("HYDRO_SHOW_PLOTS", "0") == "1"
-
-DIAGNOSTIC_PLOT_DIR = CFG["base_output_dir"] / "diagnostic_plots"
-ASSIGNMENT_PLOT_HTML = DIAGNOSTIC_PLOT_DIR / "saber_assignments.html"
 
 
 # ============================================================
@@ -512,6 +497,7 @@ def run_saber_workflow(
     n_clusters: int | None,
     make_plot: bool,
     show_plot: bool,
+    assignment_plot_html: Path,
 ) -> None:
     """
     Run the full SABER workflow from clustering to validation.
@@ -600,7 +586,7 @@ def run_saber_workflow(
             drain_csv=drain_table,
             target_model_map_csv=target_model_map_csv,
             regulate_csv=regulate_table,
-            output_html=ASSIGNMENT_PLOT_HTML,
+            output_html=assignment_plot_html,
             show=show_plot,
         )
     else:
@@ -632,19 +618,34 @@ def run_saber_workflow(
 
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
+
+def run_saber_pipeline(cfg: dict | None = None) -> None:
+    cfg = cfg or get_config()
+
+    log_config_summary(cfg)
+
+    config_path = Path(cfg["saber_config_path"])
+
+    make_plot = os.environ.get("HYDRO_MAKE_DIAGNOSTIC_PLOTS", "0") == "1"
+    show_plot = os.environ.get("HYDRO_SHOW_PLOTS", "0") == "1"
+
+    diagnostic_plot_dir = cfg["base_output_dir"] / "diagnostic_plots"
+    assignment_plot_html = diagnostic_plot_dir / "saber_assignments.html"
+
+    run_saber_workflow(
+        config_path=config_path,
+        n_clusters=N_CLUSTERS,
+        make_plot=make_plot,
+        show_plot=show_plot,
+        assignment_plot_html=assignment_plot_html,
+    )
+
 
 def main() -> None:
     setup_logging()
-    log_config_summary(CFG)
-
-    run_saber_workflow(
-        config_path=CONFIG_PATH,
-        n_clusters=N_CLUSTERS,
-        make_plot=DO_PLOT,
-        show_plot=SHOW_PLOT,
-    )
+    run_saber_pipeline()
 
 
 if __name__ == "__main__":

@@ -13,28 +13,15 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from hydro_config import get_config, log_config_summary
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config, log_config_summary
+from hydro_inflow.utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
 
-CFG = get_config()
-
 # ============================================================
-# CONFIGURATION
+# CONSTANTS
 # ============================================================
-
-CORRECTED_DIR = CFG["corrected_dir"]
-
-RIVID_MAP_PATH = CFG["rivid_map_output_path"]
-HINDCAST_PLANTS_ZARR = CFG["zarr_output_path"]
-OUTPUT_PICKLE_PATH = CFG["pypsa_inflow_pickle_path"]
-OUTPUT_NETCDF_DIR = CFG["pypsa_inflow_netcdf_dir"]
-OUTPUT_NETCDF_TEMPLATE = CFG["pypsa_inflow_netcdf_template"]
-REPORT_PATH = CFG["pypsa_inflow_report_path"]
-
-YEARS = CFG["pypsa_inflow_years"]
 
 DO_SAVE_PICKLE = True
 DO_SAVE_NETCDF = True
@@ -44,11 +31,6 @@ CORRECTED_VARIABLE_NAME = "Qmod"
 
 REMOVE_LEAP_DAY = True
 FILL_NA_WITH_ZERO = True
-
-
-# ============================================================
-# HELPERS
-# ============================================================
 
 def normalize_string_id(value) -> str:
     if pd.isna(value):
@@ -523,24 +505,36 @@ def log_sanity_check(
 
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main() -> None:
-    setup_logging()
-    log_config_summary(CFG)
+def run_saber_to_pypsa(cfg: dict | None = None) -> None:
+    cfg = cfg or get_config()
 
-    rivid_map = read_rivid_map(RIVID_MAP_PATH)
+    log_config_summary(cfg)
+
+    corrected_dir = cfg["corrected_dir"]
+
+    rivid_map_path = cfg["rivid_map_output_path"]
+    hindcast_plants_zarr = cfg["zarr_output_path"]
+    output_pickle_path = cfg["pypsa_inflow_pickle_path"]
+    output_netcdf_dir = cfg["pypsa_inflow_netcdf_dir"]
+    output_netcdf_template = cfg["pypsa_inflow_netcdf_template"]
+    report_path = cfg["pypsa_inflow_report_path"]
+
+    years = cfg["pypsa_inflow_years"]
+
+    rivid_map = read_rivid_map(rivid_map_path)
 
     model_to_plants = build_model_to_plants(rivid_map)
 
     raw_inflows = load_raw_inflows_by_plant(
         rivid_map=rivid_map,
-        hindcast_plants_zarr=HINDCAST_PLANTS_ZARR,
+        hindcast_plants_zarr=hindcast_plants_zarr,
     )
 
     corrected_inflows = load_corrected_inflows_by_plant(
-        corrected_dir=CORRECTED_DIR,
+        corrected_dir=corrected_dir,
         model_to_plants=model_to_plants,
     )
 
@@ -549,9 +543,9 @@ def main() -> None:
         corrected_inflows=corrected_inflows,
     )
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    report.to_csv(REPORT_PATH, index=False)
-    logger.info("Final inflow report saved: %s", REPORT_PATH)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report.to_csv(report_path, index=False)
+    logger.info("Final inflow report saved: %s", report_path)
 
     log_sanity_check(
         final_inflows=final_inflows,
@@ -561,19 +555,24 @@ def main() -> None:
     if DO_SAVE_PICKLE:
         save_final_inflows_pickle(
             final_inflows=final_inflows,
-            output_path=OUTPUT_PICKLE_PATH,
+            output_path=output_pickle_path,
         )
 
     if DO_SAVE_NETCDF:
-        for year in YEARS:
+        for year in years:
             save_pypsa_inflow_for_year(
                 final_inflows=final_inflows,
                 year=int(year),
-                output_dir=OUTPUT_NETCDF_DIR,
-                output_template=OUTPUT_NETCDF_TEMPLATE,
+                output_dir=output_netcdf_dir,
+                output_template=output_netcdf_template,
             )
 
     logger.info("SABER-to-PyPSA inflow conversion completed.")
+
+
+def main() -> None:
+    setup_logging()
+    run_saber_to_pypsa()
 
 
 if __name__ == "__main__":

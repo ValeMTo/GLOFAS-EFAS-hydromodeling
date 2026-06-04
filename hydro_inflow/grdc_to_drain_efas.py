@@ -17,89 +17,36 @@ import xarray as xr
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
 
-from hydro_config import get_config, log_config_summary
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config, log_config_summary
+from hydro_inflow.utils import (
+    approx_dist_km,
+    km_to_deg_lat,
+    km_to_deg_lon,
+    setup_logging,
+)
 
 
 logger = logging.getLogger(__name__)
 
-CFG = get_config()
-
 # ======================================================
-# CONFIGURATION
+# CONSTANTS
 # ======================================================
 
-# Europe bounding box
-LON_MIN = CFG["lon_min"]
-LON_MAX = CFG["lon_max"]
-LAT_MIN = CFG["lat_min"]
-LAT_MAX = CFG["lat_max"]
-
-FILE_PATH_GRDC = CFG["grdc_path"]
-EFAS_DATA_FOLDER = CFG["hydro_data_dir"]
-EFAS_FILE_TEMPLATE = CFG["hydro_file_template"]
-
-DRAIN_TABLE_PATH = CFG["drain_table_path"]
-PLANTS_PATH = CFG["plants_path"]
-
-BASE_OUTPUT_DIR = CFG["base_output_dir"]
-WORKDIR_TABLES = BASE_OUTPUT_DIR / "workdir" / "tables"
-
-STATION_MODEL_MAP_OUTPUT_PATH = BASE_OUTPUT_DIR / "station_model_map.csv"
-GAUGE_TABLE_OUTPUT_PATH = WORKDIR_TABLES / "gauge_table_all.csv"
-GAUGE_GIS_OUTPUT_PATH = BASE_OUTPUT_DIR / "gauge_gis_all.gpkg"
-GAUGE_DATA_DIR = BASE_OUTPUT_DIR / "gauge_data_grdc"
-STATION_QSIM_DIR = BASE_OUTPUT_DIR / CFG["station_qsim_dir_name"]
-
-DIAGNOSTIC_PLOT_DIR = BASE_OUTPUT_DIR / "diagnostic_plots"
-PLOT_OUTPUT_PATH = DIAGNOSTIC_PLOT_DIR / "stations_efas_overview.html"
-
-THRESHOLD_UPAREA_KM2 = CFG["threshold_uparea_km2"]
 K_NEIGHBORS = 6
 
 RATIO_MIN = 0.8
 RATIO_MAX = 1.2
 
 GRDC_VAR_NAME = "runoff_mean"
-EFAS_VAR_NAME = CFG["hydro_var_name"]
 
 START_DATE = "1992-01-01"
 END_DATE = "2025-12-31"
-YEARS = CFG["years"]
 
 MIN_OBS_PER_MONTH = 100
 
 MAX_DRAIN_DISTANCE_KM = 10.0
 DRAIN_SCORE_DISTANCE_WEIGHT = 0.5
 DRAIN_SCORE_AREA_WEIGHT = 0.5
-
-DEBUG = os.environ.get("HYDRO_LOG_LEVEL", "INFO").upper() == "DEBUG"
-
-MAKE_OVERVIEW_PLOT = os.environ.get("HYDRO_MAKE_DIAGNOSTIC_PLOTS", "0") == "1"
-
-
-# ======================================================
-# GEOGRAPHIC UTILS
-# ======================================================
-
-def km_to_deg_lat(km: float) -> float:
-    return km / 111.0
-
-
-def km_to_deg_lon(km: float, lat: float) -> float:
-    cos_lat = np.cos(np.deg2rad(lat))
-    if np.isclose(cos_lat, 0.0):
-        return np.inf
-    return km / (111.0 * cos_lat)
-
-
-def approx_dist_km(lon: float, lat: float, lon2, lat2):
-    dlon = lon2 - lon
-    dlat = lat2 - lat
-    dx_km = dlon * 111.0 * np.cos(np.deg2rad(lat))
-    dy_km = dlat * 111.0
-    return np.sqrt(dx_km**2 + dy_km**2)
-
 
 # ======================================================
 # LOAD GRDC METADATA
@@ -111,6 +58,7 @@ def load_grdc_metadata(
     lon_max: float,
     lat_min: float,
     lat_max: float,
+    threshold_uparea_km2: float,
 ) -> tuple[xr.Dataset, pd.DataFrame]:
     ds = xr.open_dataset(file_path)
 
@@ -146,10 +94,10 @@ def load_grdc_metadata(
     logger.debug("GRDC stations filtered to model domain: %d", len(grdc_df))
 
     grdc_df = grdc_df[
-        grdc_df["Area_km2"] > THRESHOLD_UPAREA_KM2
+        grdc_df["Area_km2"] > threshold_uparea_km2
     ].reset_index(drop=True)
 
-    logger.debug("GRDC stations with area > %g km2: %d", THRESHOLD_UPAREA_KM2, len(grdc_df))
+    logger.debug("GRDC stations with area > %g km2: %d", threshold_uparea_km2, len(grdc_df))
 
     return ds, grdc_df
 
@@ -870,6 +818,7 @@ def save_overview_plot(
     lon_max: float,
     lat_min: float,
     lat_max: float,
+    threshold_uparea_km2: float,
 ) -> None:
     try:
         import plotly.graph_objects as go
@@ -885,7 +834,7 @@ def save_overview_plot(
         & (df_drain["x"] <= lon_max)
         & (df_drain["y"] >= lat_min)
         & (df_drain["y"] <= lat_max)
-        & (df_drain["drainage_area"] > THRESHOLD_UPAREA_KM2)
+        & (df_drain["drainage_area"] > threshold_uparea_km2)
     ].copy()
 
     if df_drain_roi.empty:
@@ -1091,24 +1040,58 @@ def save_overview_plot(
 
 
 # ======================================================
-# MAIN
+# WORKFLOW
 # ======================================================
 
-def main() -> None:
-    setup_logging()
-    log_config_summary(CFG)
-    
+def run_grdc_to_drain_efas(cfg: dict | None = None) -> None:
+    cfg = cfg or get_config()
+
+    log_config_summary(cfg)
+
     t0 = time.time()
 
-    WORKDIR_TABLES.mkdir(parents=True, exist_ok=True)
-    BASE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    lon_min = cfg["lon_min"]
+    lon_max = cfg["lon_max"]
+    lat_min = cfg["lat_min"]
+    lat_max = cfg["lat_max"]
+
+    file_path_grdc = cfg["grdc_path"]
+    efas_data_folder = cfg["hydro_data_dir"]
+    efas_file_template = cfg["hydro_file_template"]
+    efas_var_name = cfg["hydro_var_name"]
+
+    drain_table_path = cfg["drain_table_path"]
+    plants_path = cfg["plants_path"]
+
+    base_output_dir = cfg["base_output_dir"]
+    workdir_tables = base_output_dir / "workdir" / "tables"
+
+    station_model_map_output_path = base_output_dir / "station_model_map.csv"
+    gauge_table_output_path = workdir_tables / "gauge_table_all.csv"
+    gauge_gis_output_path = base_output_dir / "gauge_gis_all.gpkg"
+
+    gauge_data_dir = base_output_dir / "gauge_data_grdc"
+    station_qsim_dir = base_output_dir / cfg["station_qsim_dir_name"]
+
+    diagnostic_plot_dir = base_output_dir / "diagnostic_plots"
+    plot_output_path = diagnostic_plot_dir / "stations_efas_overview.html"
+
+    threshold_uparea_km2 = cfg["threshold_uparea_km2"]
+    years = cfg["years"]
+
+    debug = os.environ.get("HYDRO_LOG_LEVEL", "INFO").upper() == "DEBUG"
+    make_overview_plot = os.environ.get("HYDRO_MAKE_DIAGNOSTIC_PLOTS", "0") == "1"
+
+    workdir_tables.mkdir(parents=True, exist_ok=True)
+    base_output_dir.mkdir(parents=True, exist_ok=True)
 
     ds_grdc, grdc_df = load_grdc_metadata(
-        file_path=FILE_PATH_GRDC,
-        lon_min=LON_MIN,
-        lon_max=LON_MAX,
-        lat_min=LAT_MIN,
-        lat_max=LAT_MAX,
+        file_path=file_path_grdc,
+        lon_min=lon_min,
+        lon_max=lon_max,
+        lat_min=lat_min,
+        lat_max=lat_max,
+        threshold_uparea_km2=threshold_uparea_km2,
     )
 
     df_coverage, df_final = filter_saber_ready_stations(
@@ -1128,7 +1111,7 @@ def main() -> None:
         len(df_final),
     )
 
-    df_drain = load_drain_table(DRAIN_TABLE_PATH)
+    df_drain = load_drain_table(drain_table_path)
 
     station_model_map = match_stations_to_drain(
         stations=df_final,
@@ -1149,15 +1132,16 @@ def main() -> None:
 
     efas_series_by_station = extract_efas_timeseries_by_points(
         stations=station_model_map,
-        data_folder=EFAS_DATA_FOLDER,
-        years=YEARS,
+        data_folder=efas_data_folder,
+        years=years,
         lat_col="efas_lat",
         lon_col="efas_lon",
         id_col="gauge_id",
-        var_name=EFAS_VAR_NAME,
-        file_template=EFAS_FILE_TEMPLATE,
-        debug=DEBUG,
+        var_name=efas_var_name,
+        file_template=efas_file_template,
+        debug=debug,
     )
+
     grdc_series_by_station = extract_grdc_timeseries_by_id(
         ds_grdc=ds_grdc,
         stations=df_final_mapped,
@@ -1170,7 +1154,7 @@ def main() -> None:
 
     written_obs, skipped_obs = write_gauge_data_from_dict(
         grdc_series_by_station=grdc_series_by_station,
-        out_dir=GAUGE_DATA_DIR,
+        out_dir=gauge_data_dir,
     )
 
     logger.debug("Qobs files written: %s", written_obs)
@@ -1188,33 +1172,34 @@ def main() -> None:
     station_model_map, written_sim, skipped_sim = write_station_qsim_from_dict(
         efas_series_by_station=efas_series_by_station,
         station_model_map=station_model_map,
-        out_dir=STATION_QSIM_DIR,
+        out_dir=station_qsim_dir,
     )
 
-    station_model_map.to_csv(STATION_MODEL_MAP_OUTPUT_PATH, index=False)
-    logger.info("Station model map saved: %s", STATION_MODEL_MAP_OUTPUT_PATH)
+    station_model_map.to_csv(station_model_map_output_path, index=False)
+    logger.info("Station model map saved: %s", station_model_map_output_path)
 
     gauge_table = build_gauge_table(station_model_map)
 
-    gauge_table.to_csv(GAUGE_TABLE_OUTPUT_PATH, index=False)
-    logger.info("Gauge table saved: %s", GAUGE_TABLE_OUTPUT_PATH)
+    gauge_table.to_csv(gauge_table_output_path, index=False)
+    logger.info("Gauge table saved: %s", gauge_table_output_path)
 
     save_gauge_gis(
         station_model_map=station_model_map,
         gauge_table=gauge_table,
-        out_path=GAUGE_GIS_OUTPUT_PATH,
+        out_path=gauge_gis_output_path,
     )
 
-    if MAKE_OVERVIEW_PLOT:
+    if make_overview_plot:
         save_overview_plot(
             station_model_map=station_model_map,
             df_drain=df_drain,
-            plants_path=PLANTS_PATH,
-            out_path=PLOT_OUTPUT_PATH,
-            lon_min=LON_MIN,
-            lon_max=LON_MAX,
-            lat_min=LAT_MIN,
-            lat_max=LAT_MAX,
+            plants_path=plants_path,
+            out_path=plot_output_path,
+            lon_min=lon_min,
+            lon_max=lon_max,
+            lat_min=lat_min,
+            lat_max=lat_max,
+            threshold_uparea_km2=threshold_uparea_km2,
         )
 
     logger.debug("Final check:")
@@ -1230,6 +1215,11 @@ def main() -> None:
 
     logger.info("GRDC-to-EFAS drain workflow completed.")
     logger.debug("Total time: %.1f s", time.time() - t0)
+
+
+def main() -> None:
+    setup_logging()
+    run_grdc_to_drain_efas()
 
 
 if __name__ == "__main__":

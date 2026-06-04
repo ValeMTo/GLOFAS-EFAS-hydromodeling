@@ -5,24 +5,27 @@ import logging
 import sys
 from pathlib import Path
 
-from logging_utils import setup_logging
-
-
-logger = logging.getLogger(__name__)
-
 
 def get_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+REPO_ROOT = get_repo_root()
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+from hydro_inflow.utils import setup_logging  # noqa: E402
+
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     setup_logging()
 
     repo_root = get_repo_root()
-    saber_path = repo_root / "external" / "saber_hbc"
-
-    if saber_path.exists():
-        sys.path.insert(0, str(saber_path))
 
     packages = [
         "pypsa",
@@ -54,6 +57,7 @@ def main() -> None:
     failed = []
 
     logger.info("Checking Python environment packages.")
+    logger.info("Repository root: %s", repo_root)
 
     for package in packages:
         try:

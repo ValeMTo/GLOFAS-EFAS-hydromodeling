@@ -4,6 +4,7 @@ from pathlib import Path
 import logging
 import os
 import urllib.request
+import numpy as np
 
 
 def setup_logging(level: int = logging.INFO) -> None:
@@ -74,3 +75,25 @@ def require_directory(path: Path, label: str | None = None) -> None:
     if not path.exists():
         name = label or "required directory"
         raise FileNotFoundError(f"Missing {name}: {path}")
+    
+def km_to_deg_lat(km: float) -> float:
+    return km / 111.0
+
+
+def km_to_deg_lon(km: float, lat: float) -> float:
+    cos_lat = np.cos(np.deg2rad(lat))
+
+    if np.isclose(cos_lat, 0.0):
+        return np.inf
+
+    return km / (111.0 * cos_lat)
+
+
+def approx_dist_km(lon: float, lat: float, lon2, lat2):
+    dlon = lon2 - lon
+    dlat = lat2 - lat
+
+    dx_km = dlon * 111.0 * np.cos(np.deg2rad(lat))
+    dy_km = dlat * 111.0
+
+    return np.sqrt(dx_km**2 + dy_km**2)

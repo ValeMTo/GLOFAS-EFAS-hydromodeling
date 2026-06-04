@@ -20,94 +20,38 @@ import plotly.graph_objects as go
 from plotly.colors import sample_colorscale
 from matplotlib.colors import LogNorm
 from matplotlib.gridspec import GridSpec
+from hydro_inflow.utils import (
+    approx_dist_km,
+    km_to_deg_lat,
+    km_to_deg_lon,
+    setup_logging,
+)
 
-from hydro_config import get_config, log_config_summary
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config, log_config_summary
+from hydro_inflow.utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
 
-CFG = get_config()
-
 # ============================================================
-# CONFIGURATION
+# CONSTANTS
 # ============================================================
 
-# Europe bounding box
-LON_MIN = CFG["lon_min"]
-LON_MAX = CFG["lon_max"]
-LAT_MIN = CFG["lat_min"]
-LAT_MAX = CFG["lat_max"]
-
-DRAIN_FULL_PATH = CFG["drain_full_path"]
-PLANTS_PATH = CFG["plants_path"]
-RIVER_REFERENCE_PATH = CFG["river_reference_path"]
-
-EFAS_EU_DIR = CFG["hydro_data_dir"]
-EFAS_FILE_TEMPLATE = CFG["hydro_file_template"]
-EFAS_VAR_NAME = CFG["hydro_var_name"]
-YEARS = CFG["years"]
-
-FINAL_MATCHES_OUTPUT_PATH = CFG["final_matches_output_path"]
-SERIES_OUTPUT_PATH = CFG["series_output_path"]
-RIVID_MAP_OUTPUT_PATH = CFG["rivid_map_output_path"]
-ZARR_OUTPUT_PATH = CFG["zarr_output_path"]
-
-DIAGNOSTIC_PLOT_DIR = CFG["base_output_dir"] / "diagnostic_plots"
-MATCH_PLOT_HTML_OUTPUT_PATH = DIAGNOSTIC_PLOT_DIR / (
-    f"hydro_plants_{CFG['dataset']}_matches_drain_network.html"
-)
-
-MAX_DISTANCE_KM = 10.0  # max distance (km) for matching hydro plants to drain nodes
-WINDOW = 3  # number of upstream nodes to check for storage plants point correction
+MAX_DISTANCE_KM = 10.0
+WINDOW = 3
 AREA_JUMP_THRESHOLD = 0.15
 CORR_THRESHOLD = 0.95
-MARGIN_DEG = 0.5  # margin to select river reference bbox around hydro plants, and to select drain nodes for matching
-EFFICIENCY = 0.85  # average turbine efficiency
+MARGIN_DEG = 0.5
+EFFICIENCY = 0.85
 K_NEIGH_FALLBACK = 6
 GRID_MATCH_TOLERANCE_DEG = 1e-6
 MIN_RIVER_QMAX_RATIO = 0.2
-
-MAKE_MATCH_PLOT = os.environ.get("HYDRO_MAKE_DIAGNOSTIC_PLOTS", "0") == "1"
-SHOW_CORR_BREAK_PLOTS = os.environ.get("HYDRO_SHOW_PLOTS", "0") == "1"
-DEBUG = os.environ.get("HYDRO_LOG_LEVEL", "INFO").upper() == "DEBUG"
-
-# Paper figures
-PAPER_FIGURES_DIR = CFG["paper_figures_dir"]
-PAPER_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-
-MAKE_PAPER_FIGURES = os.environ.get("HYDRO_MAKE_PAPER_FIGURES", "1") == "1"
 
 PAPER_ROR_PLANT_INDEX = 4968
 PAPER_STORAGE_PLANT_INDEX = 5556
 
 PAPER_ROR_YEAR = 2019
 PAPER_STORAGE_YEAR = 2021
-
-PAPER_ROR_FIGURE_PATH = PAPER_FIGURES_DIR / "efas_ror_matching_case.png"
-PAPER_STORAGE_FIGURE_PATH = PAPER_FIGURES_DIR / "efas_storage_correction_case.png"
-
-# ============================================================
-# GEOGRAPHIC UTILS
-# ============================================================
-
-def km_to_deg_lat(km: float) -> float:
-    return km / 111.0
-
-
-def km_to_deg_lon(km: float, lat: float) -> float:
-    cos_lat = np.cos(np.deg2rad(lat))
-    if np.isclose(cos_lat, 0.0):
-        return np.inf
-    return km / (111.0 * cos_lat)
-
-
-def approx_dist_km(lon: float, lat: float, lon2, lat2):
-    dlon = lon2 - lon
-    dlat = lat2 - lat
-    dx_km = dlon * 111.0 * np.cos(np.deg2rad(lat))
-    dy_km = dlat * 111.0
-    return np.sqrt(dx_km**2 + dy_km**2)
 
 
 # ============================================================
@@ -2243,15 +2187,19 @@ def build_saber_qsim_dataset(
 def save_outputs(
     final_matches: pd.DataFrame,
     all_years_series_clean: dict[int, xr.DataArray],
+    final_matches_output_path: Path,
+    series_output_path: Path,
+    rivid_map_output_path: Path,
+    zarr_output_path: Path,
 ) -> None:
-    FINAL_MATCHES_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SERIES_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RIVID_MAP_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ZARR_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    final_matches_output_path.parent.mkdir(parents=True, exist_ok=True)
+    series_output_path.parent.mkdir(parents=True, exist_ok=True)
+    rivid_map_output_path.parent.mkdir(parents=True, exist_ok=True)
+    zarr_output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    final_matches.to_parquet(FINAL_MATCHES_OUTPUT_PATH, index=False)
+    final_matches.to_parquet(final_matches_output_path, index=False)
 
-    with open(SERIES_OUTPUT_PATH, "wb") as f:
+    with open(series_output_path, "wb") as f:
         pickle.dump(all_years_series_clean, f)
 
     rivid_map = prepare_rivid_map(
@@ -2259,51 +2207,88 @@ def save_outputs(
         all_years_series_clean=all_years_series_clean,
     )
 
-    rivid_map.to_csv(RIVID_MAP_OUTPUT_PATH, index=False)
+    rivid_map.to_csv(rivid_map_output_path, index=False)
 
     ds_saber = build_saber_qsim_dataset(
         all_years_series_clean=all_years_series_clean,
         rivid_map=rivid_map,
     )
 
-    ds_saber.to_zarr(ZARR_OUTPUT_PATH, mode="w")
+    ds_saber.to_zarr(zarr_output_path, mode="w")
 
-    logger.info("Final matches output saved: %s", FINAL_MATCHES_OUTPUT_PATH)
-    logger.info("Series output saved: %s", SERIES_OUTPUT_PATH)
-    logger.info("Rivid map output saved: %s", RIVID_MAP_OUTPUT_PATH)
-    logger.info("SABER Zarr output saved: %s", ZARR_OUTPUT_PATH)
+    logger.info("Final matches output saved: %s", final_matches_output_path)
+    logger.info("Series output saved: %s", series_output_path)
+    logger.info("Rivid map output saved: %s", rivid_map_output_path)
+    logger.info("SABER Zarr output saved: %s", zarr_output_path)
     logger.debug("SABER dataset:\n%s", ds_saber)
 
-
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main() -> None:
-    setup_logging()
-    log_config_summary(CFG)
+def extract_efas_series_for_hydro_plants(cfg: dict | None = None) -> None:
+    cfg = cfg or get_config()
+
+    log_config_summary(cfg)
 
     t0 = time.time()
 
+    lon_min = cfg["lon_min"]
+    lon_max = cfg["lon_max"]
+    lat_min = cfg["lat_min"]
+    lat_max = cfg["lat_max"]
+
+    drain_full_path = cfg["drain_full_path"]
+    plants_path = cfg["plants_path"]
+    river_reference_path = cfg["river_reference_path"]
+
+    efas_dir = cfg["hydro_data_dir"]
+    efas_file_template = cfg["hydro_file_template"]
+    efas_var_name = cfg["hydro_var_name"]
+    years = cfg["years"]
+
+    final_matches_output_path = cfg["final_matches_output_path"]
+    series_output_path = cfg["series_output_path"]
+    rivid_map_output_path = cfg["rivid_map_output_path"]
+    zarr_output_path = cfg["zarr_output_path"]
+
+    diagnostic_plot_dir = cfg["base_output_dir"] / "diagnostic_plots"
+    match_plot_html_output_path = diagnostic_plot_dir / (
+        f"hydro_plants_{cfg['dataset']}_matches_drain_network.html"
+    )
+
+    make_match_plot = os.environ.get("HYDRO_MAKE_DIAGNOSTIC_PLOTS", "0") == "1"
+    show_corr_break_plots = os.environ.get("HYDRO_SHOW_PLOTS", "0") == "1"
+    debug = os.environ.get("HYDRO_LOG_LEVEL", "INFO").upper() == "DEBUG"
+
+    paper_figures_dir = cfg["paper_figures_dir"]
+    make_paper_figures = os.environ.get("HYDRO_MAKE_PAPER_FIGURES", "1") == "1"
+
+    paper_ror_figure_path = paper_figures_dir / "efas_ror_matching_case.png"
+    paper_storage_figure_path = paper_figures_dir / "efas_storage_correction_case.png"
+
+    if make_paper_figures:
+        paper_figures_dir.mkdir(parents=True, exist_ok=True)
+
     hydro_ppls = load_hydro_power_plants(
-        plants_path=PLANTS_PATH,
-        lon_min=LON_MIN,
-        lon_max=LON_MAX,
-        lat_min=LAT_MIN,
-        lat_max=LAT_MAX,
+        plants_path=plants_path,
+        lon_min=lon_min,
+        lon_max=lon_max,
+        lat_min=lat_min,
+        lat_max=lat_max,
         efficiency=EFFICIENCY,
     )
 
     river_bbox, river_mean = build_river_bbox_and_mean(
         hydro_ppls=hydro_ppls,
-        river_reference_path=RIVER_REFERENCE_PATH,
-        var_name=EFAS_VAR_NAME,
+        river_reference_path=river_reference_path,
+        var_name=efas_var_name,
         margin_deg=MARGIN_DEG,
     )
 
     plants_with_storage = build_storage_plants(hydro_ppls)
 
-    df_drain = load_drain_table(DRAIN_FULL_PATH)
+    df_drain = load_drain_table(drain_full_path)
 
     plants_gdf = prepare_plants_gdf(hydro_ppls)
 
@@ -2325,25 +2310,25 @@ def main() -> None:
         window=WINDOW,
         area_jump_threshold=AREA_JUMP_THRESHOLD,
         corr_threshold=CORR_THRESHOLD,
-        do_plot=SHOW_CORR_BREAK_PLOTS,
-        verbose=DEBUG,
+        do_plot=show_corr_break_plots,
+        verbose=debug,
     )
 
     final_matches = build_final_matches(matched_df)
 
     logger.info("Total plants for extraction: %s", len(final_matches))
 
-    if MAKE_PAPER_FIGURES:
+    if make_paper_figures:
         plot_efas_ror_paper_case(
             plant_index=PAPER_ROR_PLANT_INDEX,
             hydro_ppls=hydro_ppls,
             df_drain=df_drain,
             river_mean=river_mean,
-            efas_dir=EFAS_EU_DIR,
-            var_name=EFAS_VAR_NAME,
-            file_template=EFAS_FILE_TEMPLATE,
+            efas_dir=efas_dir,
+            var_name=efas_var_name,
+            file_template=efas_file_template,
             year=PAPER_ROR_YEAR,
-            output_path=PAPER_ROR_FIGURE_PATH,
+            output_path=paper_ror_figure_path,
             k_neigh=K_NEIGH_FALLBACK,
             max_distance_km=MAX_DISTANCE_KM,
             min_river_qmax_ratio=MIN_RIVER_QMAX_RATIO,
@@ -2356,11 +2341,11 @@ def main() -> None:
             hydro_ppls=hydro_ppls,
             df_drain=df_drain,
             final_matches=final_matches,
-            efas_dir=EFAS_EU_DIR,
-            var_name=EFAS_VAR_NAME,
-            file_template=EFAS_FILE_TEMPLATE,
+            efas_dir=efas_dir,
+            var_name=efas_var_name,
+            file_template=efas_file_template,
             year=PAPER_STORAGE_YEAR,
-            output_path=PAPER_STORAGE_FIGURE_PATH,
+            output_path=paper_storage_figure_path,
             context_km=15.0,
             marker_offset_km=0.8,
         )
@@ -2372,25 +2357,29 @@ def main() -> None:
 
     all_years_series_clean = extract_efas_series(
         final_matches=final_matches,
-        efas_dir=EFAS_EU_DIR,
-        years=YEARS,
-        var_name=EFAS_VAR_NAME,
-        file_template=EFAS_FILE_TEMPLATE,
+        efas_dir=efas_dir,
+        years=years,
+        var_name=efas_var_name,
+        file_template=efas_file_template,
     )
 
     save_outputs(
         final_matches=final_matches,
         all_years_series_clean=all_years_series_clean,
+        final_matches_output_path=final_matches_output_path,
+        series_output_path=series_output_path,
+        rivid_map_output_path=rivid_map_output_path,
+        zarr_output_path=zarr_output_path,
     )
 
-    if MAKE_MATCH_PLOT:
+    if make_match_plot:
         plot_hydro_matches_on_drainage_network_plotly(
             df_drain=df_drain,
             hydro_ppls=hydro_ppls,
             final_matches=final_matches,
-            output_html_path=MATCH_PLOT_HTML_OUTPUT_PATH,
+            output_html_path=match_plot_html_output_path,
             title=(
-                f"Hydropower plants matched to {CFG['dataset'].upper()} "
+                f"Hydropower plants matched to {cfg['dataset'].upper()} "
                 "drainage network"
             ),
         )
@@ -2402,6 +2391,11 @@ def main() -> None:
 
     logger.info("Hydropower plant series extraction completed.")
     logger.debug("Total time: %.1f s", time.time() - t0)
+
+
+def main() -> None:
+    setup_logging()
+    extract_efas_series_for_hydro_plants()
 
 
 if __name__ == "__main__":

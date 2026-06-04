@@ -23,45 +23,22 @@ from scipy.spatial import KDTree, cKDTree
 from shapely.geometry import box
 from sklearn.cluster import DBSCAN
 
-from hydro_config import get_config, log_config_summary
-from logging_utils import setup_logging
+from hydro_inflow.hydro_config import get_config, log_config_summary
+from hydro_inflow.utils import setup_logging
 
 
 logger = logging.getLogger(__name__)
 
-CFG = get_config()
-
 # ============================================================
-# CONFIGURATION
+# CONSTANTS
 # ============================================================
 
-# Europe bounding box
-LON_MIN = CFG["lon_min"]
-LON_MAX = CFG["lon_max"]
-LAT_MIN = CFG["lat_min"]
-LAT_MAX = CFG["lat_max"]
-
-BUFFER_MARGIN_DEG = 0.5  # margin for hydrobasins shape selection
+BUFFER_MARGIN_DEG = 0.5
 MIN_POSITIVE_VALUE = 1e-10
-
-UPAREA_PATH = CFG["uparea_path"]
-HYDROBASINS_PATH = CFG["hydrobasins_path"]
-
-UPAREA_VARIABLE_NAME = CFG["uparea_variable_name"]
 HYDROBASINS_CRS_EPSG = 4326
-_GEOD = Geod(ellps="WGS84")
-
-THRESHOLD_UPAREA_KM2 = CFG["threshold_uparea_km2"]
-
-GRID_STEP = CFG["grid_step"]
-TOLERANCE_FACTOR = CFG["tolerance_factor"]
-MAX_DISTANCE_DEG = GRID_STEP * np.sqrt(2) * TOLERANCE_FACTOR
 MIN_SAMPLES_DBSCAN = 1
 
-DRAIN_CSV_OUTPUT_PATH = CFG["drain_csv_output_path"]
-DRAIN_PARQUET_OUTPUT_PATH = CFG["drain_parquet_output_path"]
-DRAIN_GIS_OUTPUT_PATH = CFG["drain_gis_output_path"]
-
+_GEOD = Geod(ellps="WGS84")
 
 # ============================================================
 # 1) LOAD AND PREPARE UPSTREAM AREA
@@ -1591,22 +1568,42 @@ def build_drain_gis(df_drain, output_path, crs="EPSG:4326"):
     return gdf
 
 # ============================================================
-# MAIN
+# WORKFLOW
 # ============================================================
 
-def main() -> None:
-    setup_logging()
-    log_config_summary(CFG)
+def build_efas_drainage_network(cfg: dict | None = None) -> None:
+    cfg = cfg or get_config()
+
+    log_config_summary(cfg)
 
     t0 = time.time()
 
+    lon_min = cfg["lon_min"]
+    lon_max = cfg["lon_max"]
+    lat_min = cfg["lat_min"]
+    lat_max = cfg["lat_max"]
+
+    uparea_path = cfg["uparea_path"]
+    hydrobasins_path = cfg["hydrobasins_path"]
+
+    uparea_variable_name = cfg["uparea_variable_name"]
+    threshold_uparea_km2 = cfg["threshold_uparea_km2"]
+
+    grid_step = cfg["grid_step"]
+    tolerance_factor = cfg["tolerance_factor"]
+    max_distance_deg = grid_step * np.sqrt(2) * tolerance_factor
+
+    drain_csv_output_path = cfg["drain_csv_output_path"]
+    drain_parquet_output_path = cfg["drain_parquet_output_path"]
+    drain_gis_output_path = cfg["drain_gis_output_path"]
+
     uparea_km2 = load_and_prepare_upstream_area(
-        uparea_path=UPAREA_PATH,
-        variable_name=UPAREA_VARIABLE_NAME,
-        lon_min=LON_MIN,
-        lon_max=LON_MAX,
-        lat_min=LAT_MIN,
-        lat_max=LAT_MAX,
+        uparea_path=uparea_path,
+        variable_name=uparea_variable_name,
+        lon_min=lon_min,
+        lon_max=lon_max,
+        lat_min=lat_min,
+        lat_max=lat_max,
         min_positive_value=MIN_POSITIVE_VALUE,
     )
 
@@ -1616,7 +1613,7 @@ def main() -> None:
         longitude_coords=longitude_coords,
         latitude_coords=latitude_coords,
         uparea_values=uparea_values,
-        threshold_km2=THRESHOLD_UPAREA_KM2,
+        threshold_km2=threshold_uparea_km2,
     )
 
     domain_bbox = build_domain_bbox(
@@ -1626,7 +1623,7 @@ def main() -> None:
     )
 
     hydrobasins_clipped = load_and_clip_hydrobasins(
-        hydrobasins_path=HYDROBASINS_PATH,
+        hydrobasins_path=hydrobasins_path,
         domain_bbox=domain_bbox,
         crs_epsg=HYDROBASINS_CRS_EPSG,
     )
@@ -1640,12 +1637,12 @@ def main() -> None:
     gdf_river = assign_hydrobasins_to_river_points(
         gdf_river=gdf_river,
         hydrobasins_clipped=hydrobasins_clipped,
-        max_distance_deg=MAX_DISTANCE_DEG,
+        max_distance_deg=max_distance_deg,
     )
 
     filtered_clusters = cluster_river_points_by_basin(
         gdf_river=gdf_river,
-        max_distance_deg=MAX_DISTANCE_DEG,
+        max_distance_deg=max_distance_deg,
         min_samples=MIN_SAMPLES_DBSCAN,
     )
 
@@ -1656,9 +1653,9 @@ def main() -> None:
 
     all_graphs = run_downstream_graph_all_basins(
         filtered_clusters,
-        max_distance_deg=MAX_DISTANCE_DEG,
-        grid_step=GRID_STEP,
-        max_gap=THRESHOLD_UPAREA_KM2,
+        max_distance_deg=max_distance_deg,
+        grid_step=grid_step,
+        max_gap=threshold_uparea_km2,
         min_delta_factor=0.85,
     )
 
@@ -1666,21 +1663,21 @@ def main() -> None:
 
     all_graphs = run_connect_lonely_extremes_all(
         all_graphs,
-        max_distance_deg=MAX_DISTANCE_DEG,
+        max_distance_deg=max_distance_deg,
     )
 
     graphs_after = iterate_extreme_group_resolution(
         all_graphs,
-        max_distance_deg=MAX_DISTANCE_DEG,
-        grid_step=GRID_STEP,
-        threshold_uparea=THRESHOLD_UPAREA_KM2,
+        max_distance_deg=max_distance_deg,
+        grid_step=grid_step,
+        threshold_uparea=threshold_uparea_km2,
     )
 
     graphs_fixed = attach_dangling_sinks_all(
         graphs_after,
-        max_distance_deg=MAX_DISTANCE_DEG,
-        grid_step=GRID_STEP,
-        threshold_uparea=THRESHOLD_UPAREA_KM2,
+        max_distance_deg=max_distance_deg,
+        grid_step=grid_step,
+        threshold_uparea=threshold_uparea_km2,
         min_delta_factor=0.85,
     )
 
@@ -1688,7 +1685,7 @@ def main() -> None:
 
     graphs_merged = merge_clusters_by_sink_headwater(
         graphs_fixed,
-        max_distance_deg=MAX_DISTANCE_DEG,
+        max_distance_deg=max_distance_deg,
         max_iter=10,
         verbose=False,
     )
@@ -1697,20 +1694,25 @@ def main() -> None:
 
     save_drain_outputs(
         df_drain=df_drain,
-        saber_csv_path=DRAIN_CSV_OUTPUT_PATH,
-        full_parquet_path=DRAIN_PARQUET_OUTPUT_PATH,
+        saber_csv_path=drain_csv_output_path,
+        full_parquet_path=drain_parquet_output_path,
     )
 
     gdf_drain = build_drain_gis(
         df_drain=df_drain,
-        output_path=DRAIN_GIS_OUTPUT_PATH,
+        output_path=drain_gis_output_path,
     )
 
-    logger.debug("Drain GIS saved: %s", DRAIN_GIS_OUTPUT_PATH)
+    logger.debug("Drain GIS saved: %s", drain_gis_output_path)
     logger.debug("Drain GIS created: %s points", f"{len(gdf_drain):,}")
 
     logger.info("Drainage network construction completed.")
     logger.debug("Total time: %.1f s", time.time() - t0)
+
+
+def main() -> None:
+    setup_logging()
+    build_efas_drainage_network()
 
 
 if __name__ == "__main__":

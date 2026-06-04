@@ -4,10 +4,25 @@ from pathlib import Path
 import argparse
 import logging
 import os
-import subprocess
-import sys
+from collections.abc import Callable
 
 from hydro_inflow.utils import get_repo_root, setup_logging
+
+from hydro_inflow.glofas_to_drainage_network import build_glofas_drainage_network
+from hydro_inflow.efas_to_drainage_network import build_efas_drainage_network
+from hydro_inflow.extract_glofas_series_for_hydro_plants import (
+    extract_glofas_series_for_hydro_plants,
+)
+from hydro_inflow.extract_efas_series_for_hydro_plants import (
+    extract_efas_series_for_hydro_plants,
+)
+from hydro_inflow.grdc_to_drain_glofas import run_grdc_to_drain_glofas
+from hydro_inflow.grdc_to_drain_efas import run_grdc_to_drain_efas
+from hydro_inflow.GRanD_to_drain import run_grand_to_drain
+from hydro_inflow.saber_preprocessing import run_saber_preprocessing
+from hydro_inflow.write_saber_config import write_saber_config
+from hydro_inflow.run_saber import run_saber_pipeline
+from hydro_inflow.saber_to_pypsa import run_saber_to_pypsa
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +52,30 @@ DATASET_STEPS = {
 }
 
 
+PYTHON_STEP_FUNCTIONS: dict[str, dict[str, Callable[[], object]]] = {
+    "glofas": {
+        "glofas_to_drainage_network.py": build_glofas_drainage_network,
+        "extract_glofas_series_for_hydro_plants.py": extract_glofas_series_for_hydro_plants,
+        "grdc_to_drain_glofas.py": run_grdc_to_drain_glofas,
+        "GRanD_to_drain.py": run_grand_to_drain,
+        "saber_preprocessing.py": run_saber_preprocessing,
+        "write_saber_config.py": write_saber_config,
+        "run_saber.py": run_saber_pipeline,
+        "saber_to_pypsa.py": run_saber_to_pypsa,
+    },
+    "efas": {
+        "efas_to_drainage_network.py": build_efas_drainage_network,
+        "extract_efas_series_for_hydro_plants.py": extract_efas_series_for_hydro_plants,
+        "grdc_to_drain_efas.py": run_grdc_to_drain_efas,
+        "GRanD_to_drain.py": run_grand_to_drain,
+        "saber_preprocessing.py": run_saber_preprocessing,
+        "write_saber_config.py": write_saber_config,
+        "run_saber.py": run_saber_pipeline,
+        "saber_to_pypsa.py": run_saber_to_pypsa,
+    },
+}
+
+
 def get_hydro_scripts_dir(repo_root: Path | None = None) -> Path:
     if repo_root is None:
         repo_root = get_repo_root()
@@ -44,34 +83,20 @@ def get_hydro_scripts_dir(repo_root: Path | None = None) -> Path:
     return repo_root / "hydro_inflow"
 
 
-def get_saber_hbc_dir(repo_root: Path | None = None) -> Path:
-    if repo_root is None:
-        repo_root = get_repo_root()
-
-    return repo_root / "external" / "saber_hbc"
-
-
 def build_environment(dataset: str, repo_root: Path | None = None) -> dict[str, str]:
     if repo_root is None:
         repo_root = get_repo_root()
 
     hydro_scripts_dir = get_hydro_scripts_dir(repo_root)
-    saber_hbc_dir = get_saber_hbc_dir(repo_root)
 
     env = os.environ.copy()
-
     env["HYDRO_DATASET"] = dataset
     env["HYDRO_REPO_ROOT"] = str(repo_root)
     env["HYDRO_SCRIPTS_DIR"] = str(hydro_scripts_dir)
 
+    existing_pythonpath = env.get("PYTHONPATH")
     pythonpath_parts = [str(repo_root)]
 
-    if saber_hbc_dir.exists():
-        pythonpath_parts.append(str(saber_hbc_dir))
-    else:
-        logger.warning("SABER package directory not found: %s", saber_hbc_dir)
-
-    existing_pythonpath = env.get("PYTHONPATH")
     if existing_pythonpath:
         pythonpath_parts.append(existing_pythonpath)
 
@@ -102,14 +127,17 @@ def check_required_files(dataset: str, repo_root: Path | None = None) -> None:
         if not script_path.exists():
             missing.append(script_path)
 
+        if script_name not in PYTHON_STEP_FUNCTIONS[dataset]:
+            missing.append(Path(f"Missing Python function mapping for {script_name}"))
+
     if missing:
         missing_text = "\n".join(str(path) for path in missing)
         raise FileNotFoundError(
-            "Missing required hydro inflow framework files/directories:\n"
+            "Missing required hydro inflow framework files/functions:\n"
             f"{missing_text}"
         )
 
-    logger.debug("All framework scripts are present for dataset: %s", dataset)
+    logger.debug("All framework scripts/functions are present for dataset: %s", dataset)
 
 
 def select_steps(
@@ -151,34 +179,44 @@ def run_step(
     if repo_root is None:
         repo_root = get_repo_root()
 
-    hydro_scripts_dir = get_hydro_scripts_dir(repo_root)
-    script_path = hydro_scripts_dir / script_name
     env = build_environment(dataset=dataset, repo_root=repo_root)
-
-    command = [sys.executable, str(script_path)]
+    step_function = PYTHON_STEP_FUNCTIONS[dataset][script_name]
 
     logger.info("=" * 90)
     logger.info("Step: %s", script_name)
-    logger.info("Command: %s", " ".join(command))
-    logger.info("Working directory: %s", hydro_scripts_dir)
+    logger.info("Mode: Python function")
+    logger.info("Function: %s.%s", step_function.__module__, step_function.__name__)
     logger.info("HYDRO_DATASET: %s", dataset)
     logger.info("=" * 90)
 
     if dry_run:
-        logger.info("Dry run: step not executed.")
+        logger.info("Dry run: function not executed.")
         return
 
+    previous_dataset = os.environ.get("HYDRO_DATASET")
+    previous_repo_root = os.environ.get("HYDRO_REPO_ROOT")
+    previous_scripts_dir = os.environ.get("HYDRO_SCRIPTS_DIR")
+    previous_pythonpath = os.environ.get("PYTHONPATH")
+
+    os.environ.update(env)
+
     try:
-        subprocess.run(
-            command,
-            cwd=hydro_scripts_dir,
-            env=env,
-            check=True,
-        )
-    except subprocess.CalledProcessError as error:
-        logger.error("Step failed: %s", script_name)
-        logger.error("Return code: %s", error.returncode)
+        step_function()
+    except Exception:
+        logger.exception("Step failed: %s", script_name)
         raise
+    finally:
+        restore_environment_variable("HYDRO_DATASET", previous_dataset)
+        restore_environment_variable("HYDRO_REPO_ROOT", previous_repo_root)
+        restore_environment_variable("HYDRO_SCRIPTS_DIR", previous_scripts_dir)
+        restore_environment_variable("PYTHONPATH", previous_pythonpath)
+
+
+def restore_environment_variable(name: str, previous_value: str | None) -> None:
+    if previous_value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = previous_value
 
 
 def run_hydro_inflow_framework(
@@ -220,7 +258,7 @@ def run_hydro_inflow_framework(
             logger.info("  %s. %s", index, step)
 
         if dry_run:
-            logger.info("Dry run mode: commands will be printed but not executed.")
+            logger.info("Dry run mode: functions will be printed but not executed.")
 
         for step in selected_steps:
             run_step(
@@ -262,7 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the selected commands without executing them.",
+        help="Print the selected functions without executing them.",
     )
 
     parser.add_argument(
