@@ -199,6 +199,9 @@ def build_snakemake_command(
         "snakemake",
         "--cores",
         str(cores),
+        "--configfile",
+        str(scenario.config),
+        "--nolock",
     ]
 
     if rerun_incomplete:
@@ -249,11 +252,12 @@ def run_scenario(
         logger.info("Target already exists, skipping scenario: %s", target_path)
         return
 
-    copy_config_to_active_config(
-        scenario_config=scenario.config,
-        active_config=active_config,
-        dryrun=dryrun,
-    )
+    if not scenario.config.exists():
+        raise FileNotFoundError(f"Missing scenario config: {scenario.config}")
+
+    logger.info("Using scenario config through Snakemake --configfile:")
+    logger.info("  configfile: %s", scenario.config)
+    logger.info("  active config is not modified")
 
     command = build_snakemake_command(
         scenario=scenario,
@@ -313,9 +317,9 @@ def run_pypsa_scenarios(
             snakemake_dryrun=snakemake_dryrun,
         )
 
-    backup_config = backup_active_config(
-        active_config=active_config,
-        dryrun=dryrun,
+    backup_config = None
+    logger.info(
+        "Scenario configs are passed with Snakemake --configfile; active PyPSA config will not be modified."
     )
 
     try:
@@ -333,18 +337,7 @@ def run_pypsa_scenarios(
                 dryrun=dryrun,
             )
     finally:
-        if dryrun:
-            logger.info("Dryrun mode: active config was not modified, skipping restore.")
-        elif no_restore_config:
-            logger.info(
-                "Leaving last scenario config active because no_restore_config=True."
-            )
-        else:
-            restore_active_config(
-                backup_config=backup_config,
-                active_config=active_config,
-                dryrun=False,
-            )
+        logger.info("No active PyPSA config restore needed; active config was not modified.")
 
     logger.info("Selected PyPSA-Eur scenarios completed.")
 
