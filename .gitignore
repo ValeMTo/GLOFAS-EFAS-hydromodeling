@@ -228,3 +228,5 @@ __pycache__/
 
 # Local postprocessing outputs
 hydro_results/
+# Local hydro reference data not distributed in repository
+data/pypsa/GloHydroRes_vs1.csv
