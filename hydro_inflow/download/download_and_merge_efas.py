@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+import gc
 import glob
 import logging
 import os
@@ -259,6 +260,8 @@ def process_efas_year(
             finally:
                 ds_current.close()
                 ds_current_cut.close()
+                dis06 = dis06_shifted = daily = daily_ds = None
+                gc.collect()
 
         logger.info("Merging monthly daily cut files into annual EFAS file.")
 

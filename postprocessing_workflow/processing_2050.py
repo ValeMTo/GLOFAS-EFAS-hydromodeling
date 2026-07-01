@@ -434,13 +434,6 @@ def plot_grouped_bar_difference(
         fontsize=12,
     )
 
-    ax.set_title(
-        f"Difference vs PyPSA baseline - {metric}",
-        fontsize=16,
-        fontweight="bold",
-        pad=10,
-    )
-
     ax.set_xlabel("")
 
     ax.set_ylabel(
@@ -473,20 +466,21 @@ def plot_grouped_bar_difference(
 
 
 def make_capacity_and_supply_figures(networks, output_dir):
+    """Supply difference figure (absolute, TWh).
+
+    Optimal Capacity is handled separately by make_optimal_capacity_pct_figure.
+    """
     components_to_keep = ["Generator", "StorageUnit"]
 
     metrics_to_plot = [
-        "Optimal Capacity",
         "Supply",
     ]
 
     metric_units = {
-        "Optimal Capacity": "GW",
         "Supply": "TWh",
     }
 
     metric_conversion_factors = {
-        "Optimal Capacity": 1 / 1e3,
         "Supply": 1 / 1e6,
     }
 
@@ -495,7 +489,6 @@ def make_capacity_and_supply_figures(networks, output_dir):
     top_n_technologies = None
 
     output_figures = {
-        "Optimal Capacity": output_dir / "optimal_capacity.png",
         "Supply": output_dir / "supply_diff.png",
     }
 
@@ -562,6 +555,180 @@ def make_capacity_and_supply_figures(networks, output_dir):
             output_path=output_figures[metric],
             show_baseline_values_in_xticks=True,
         )
+
+
+# ============================================================
+# OPTIMAL CAPACITY DIFFERENCE FIGURE (percentage)
+# ============================================================
+
+def make_optimal_capacity_pct_figure(networks, output_path):
+    """Optimal-capacity difference vs baseline, in percent, with absolute
+    ('+X.X GW') labels on the bars."""
+    components_to_keep = ["Generator", "StorageUnit"]
+
+    metric = "Optimal Capacity"
+    unit = "GW"
+    conversion_factor = 1 / 1e3
+
+    min_abs_value = 0.1
+    min_baseline_value = 0.1
+    show_baseline_values_in_xticks = True
+
+    technologies_to_exclude = [
+        "Rural Heat Vent",
+        "Urban Decentral Heat Vent",
+    ]
+
+    stats = {
+        name: get_numeric_statistics(network)
+        for name, network in networks.items()
+    }
+
+    full_index = stats[BASELINE_NAME].index
+    full_columns = stats[BASELINE_NAME].columns
+
+    for name in COMPARISON_NAMES:
+        full_index = full_index.union(stats[name].index)
+        full_columns = full_columns.union(stats[name].columns)
+
+    for name in stats:
+        stats[name] = stats[name].reindex(index=full_index, columns=full_columns)
+
+    stats_filtered = {
+        name: filter_components(df, components_to_keep)
+        for name, df in stats.items()
+    }
+
+    absolute_df = pd.DataFrame(
+        {
+            name: aggregate_by_technology(stats_filtered[name], metric)
+            for name in [BASELINE_NAME] + COMPARISON_NAMES
+        }
+    ).fillna(0.0) * conversion_factor
+
+    diff_df = pd.DataFrame(
+        {
+            name: aggregate_by_technology(stats_filtered[name], metric)
+            - aggregate_by_technology(stats_filtered[BASELINE_NAME], metric)
+            for name in COMPARISON_NAMES
+        }
+    ).fillna(0.0) * conversion_factor
+
+    baseline_series = absolute_df[BASELINE_NAME]
+
+    mask = diff_df.abs().max(axis=1) > min_abs_value
+    diff_df = diff_df.loc[mask]
+
+    mask2 = baseline_series.reindex(diff_df.index).abs() > min_baseline_value
+    diff_df = diff_df.loc[mask2]
+
+    diff_df = diff_df.loc[
+        diff_df.abs().max(axis=1).sort_values(ascending=False).index
+    ]
+
+    if technologies_to_exclude:
+        diff_df = diff_df.drop(
+            index=[t for t in technologies_to_exclude if t in diff_df.index]
+        )
+
+    baseline_series = baseline_series.reindex(diff_df.index).fillna(0.0)
+
+    pct_df = diff_df.divide(
+        baseline_series.replace(0, np.nan),
+        axis=0,
+    ) * 100
+
+    if pct_df.empty:
+        return
+
+    fixed_figsize = (10, 6.5)
+
+    fig = plt.figure(figsize=fixed_figsize, facecolor="white")
+    ax = fig.add_axes([0.09, 0.35, 0.90, 0.62])
+
+    colors = [SCENARIO_COLORS.get(col, None) for col in pct_df.columns]
+
+    pct_df.plot(
+        kind="bar",
+        ax=ax,
+        width=0.8,
+        edgecolor="black",
+        linewidth=0.6,
+        color=colors,
+        zorder=3,
+    )
+
+    ax.axhline(0, color="black", linewidth=1.0, zorder=4)
+
+    n_scenarios = len(pct_df.columns)
+    bar_width = 0.8
+
+    for i, tech in enumerate(pct_df.index):
+        for j, scenario in enumerate(pct_df.columns):
+            pct_val = pct_df.loc[tech, scenario]
+            abs_val = diff_df.loc[tech, scenario]
+
+            if pd.isna(pct_val) or pd.isna(abs_val):
+                continue
+
+            offset = (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios)
+            x_pos = i + offset
+
+            sign = "+" if abs_val >= 0 else ""
+            label = f"{sign}{abs_val:.1f} {unit}"
+
+            y_offset = 0.5 if pct_val >= 0 else -0.5
+            va = "bottom" if pct_val >= 0 else "top"
+
+            ax.text(
+                x_pos,
+                pct_val + y_offset,
+                label,
+                ha="center",
+                va=va,
+                fontsize=7.5,
+                color="black",
+                rotation=90,
+            )
+
+    if show_baseline_values_in_xticks:
+        xtick_labels = [
+            f"{tech}\n(Baseline {baseline_series.loc[tech]:.1f} {unit})"
+            for tech in pct_df.index
+        ]
+    else:
+        xtick_labels = list(pct_df.index)
+
+    ax.set_xticklabels(xtick_labels, rotation=45, ha="right", fontsize=12)
+
+    ax.set_xlabel("")
+    ax.set_ylabel(f"Difference in {metric} [%]", fontsize=13)
+
+    ax.tick_params(axis="both", which="major", labelsize=12)
+
+    ax.legend(
+        title="Scenario",
+        loc="lower right",
+        frameon=True,
+        framealpha=0.95,
+        edgecolor="black",
+        fontsize=12,
+        title_fontsize=12,
+    )
+
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35, zorder=0)
+    ax.set_axisbelow(True)
+
+    y_min = pct_df.min().min()
+    y_max = pct_df.max().max()
+    y_range = max(abs(y_min), abs(y_max), 1e-9)
+
+    ax.set_ylim(
+        y_min - 0.30 * y_range,
+        y_max + 0.30 * y_range,
+    )
+
+    save_figure(fig, output_path)
 
 
 # ============================================================
@@ -768,13 +935,6 @@ def make_cost_difference_figure(networks, output_path):
         fontsize=12,
     )
 
-    ax.set_title(
-        "System cost difference vs PyPSA baseline by category",
-        fontsize=16,
-        fontweight="bold",
-        pad=10,
-    )
-
     ax.set_xlabel("")
 
     ax.set_ylabel(
@@ -828,7 +988,7 @@ def make_cost_difference_figure(networks, output_path):
 
 
 # ============================================================
-# STORAGE DIFFERENCE FIGURE
+# STORAGE DIFFERENCE FIGURE (percentage)
 # ============================================================
 
 def extract_store_capacity_by_technology(
@@ -859,6 +1019,8 @@ def extract_store_capacity_by_technology(
 
 
 def make_storage_difference_figure(networks, output_path):
+    """Storage installation difference vs baseline, in percent, with absolute
+    ('+X.X TWh') labels on the bars."""
     component_to_keep = "Store"
     metric = "Optimal Capacity"
 
@@ -912,40 +1074,47 @@ def make_storage_difference_figure(networks, output_path):
 
     difference_df = difference_df.drop(columns=[BASELINE_NAME])
 
+    baseline_col = absolute_df[BASELINE_NAME]
+    pct_difference_df = difference_df.divide(
+        baseline_col.replace(0, np.nan),
+        axis=0,
+    ) * 100
+
     if drop_all_zero_differences:
-        difference_df = difference_df.loc[difference_df.abs().sum(axis=1) > 0]
+        mask = difference_df.abs().sum(axis=1) > 0
+        difference_df = difference_df.loc[mask]
+        pct_difference_df = pct_difference_df.loc[mask]
 
     if min_abs_difference is not None and min_abs_difference > 0:
-        difference_df = difference_df.loc[
-            difference_df.abs().max(axis=1) >= min_abs_difference
-        ]
+        mask = difference_df.abs().max(axis=1) >= min_abs_difference
+        difference_df = difference_df.loc[mask]
+        pct_difference_df = pct_difference_df.loc[mask]
 
     baseline_values = absolute_df.loc[difference_df.index, BASELINE_NAME]
 
     if drop_zero_pypsa_baseline:
         nonzero_baseline_mask = baseline_values.abs() > min_baseline_value
         difference_df = difference_df.loc[nonzero_baseline_mask]
+        pct_difference_df = pct_difference_df.loc[nonzero_baseline_mask]
         baseline_values = baseline_values.loc[nonzero_baseline_mask]
 
     if sort_by_max_abs_difference and not difference_df.empty:
         order = difference_df.abs().max(axis=1).sort_values(ascending=False).index
         difference_df = difference_df.loc[order]
+        pct_difference_df = pct_difference_df.loc[order]
         baseline_values = baseline_values.loc[order]
 
-    if difference_df.empty:
+    if pct_difference_df.empty:
         return
 
-    fixed_figsize = (10, 7)
+    fixed_figsize = (10, 6.5)
 
     fig = plt.figure(figsize=fixed_figsize, facecolor="white")
-    ax = fig.add_axes([0.09, 0.24, 0.90, 0.70])
+    ax = fig.add_axes([0.09, 0.35, 0.90, 0.62])
 
-    colors = [
-        SCENARIO_COLORS.get(col, None)
-        for col in difference_df.columns
-    ]
+    colors = [SCENARIO_COLORS.get(col, None) for col in pct_difference_df.columns]
 
-    difference_df.plot(
+    pct_difference_df.plot(
         kind="bar",
         ax=ax,
         width=0.8,
@@ -955,16 +1124,42 @@ def make_storage_difference_figure(networks, output_path):
         zorder=3,
     )
 
-    ax.axhline(
-        0,
-        color="black",
-        linewidth=1.0,
-        zorder=4,
-    )
+    ax.axhline(0, color="black", linewidth=1.0, zorder=4)
+
+    n_scenarios = len(pct_difference_df.columns)
+    bar_width = 0.8
+
+    for i, tech in enumerate(pct_difference_df.index):
+        for j, scenario in enumerate(pct_difference_df.columns):
+            pct_val = pct_difference_df.loc[tech, scenario]
+            abs_val = difference_df.loc[tech, scenario]
+
+            if pd.isna(pct_val) or pd.isna(abs_val):
+                continue
+
+            offset = (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios)
+            x_pos = i + offset
+
+            sign = "+" if abs_val >= 0 else ""
+            label = f"{sign}{abs_val:.1f} {unit}"
+
+            y_offset = 0.5 if pct_val >= 0 else -0.5
+            va = "bottom" if pct_val >= 0 else "top"
+
+            ax.text(
+                x_pos,
+                pct_val + y_offset,
+                label,
+                ha="center",
+                va=va,
+                fontsize=7.5,
+                color="black",
+                rotation=90,
+            )
 
     xtick_labels = [
         f"{tech}\n(Baseline: {baseline_values.loc[tech]:.1f} {unit})"
-        for tech in difference_df.index
+        for tech in pct_difference_df.index
     ]
 
     ax.set_xticklabels(
@@ -974,17 +1169,10 @@ def make_storage_difference_figure(networks, output_path):
         fontsize=12,
     )
 
-    ax.set_title(
-        "Storage installation difference vs PyPSA baseline",
-        fontsize=16,
-        fontweight="bold",
-        pad=10,
-    )
-
     ax.set_xlabel("")
 
     ax.set_ylabel(
-        f"Difference in {metric} [{unit}]",
+        f"Difference in {metric} [%]",
         fontsize=13,
     )
 
@@ -1010,20 +1198,20 @@ def make_storage_difference_figure(networks, output_path):
 
     ax.set_axisbelow(True)
 
-    y_min = difference_df.min().min()
-    y_max = difference_df.max().max()
+    y_min = pct_difference_df.min().min()
+    y_max = pct_difference_df.max().max()
     y_range = max(abs(y_min), abs(y_max), 1e-9)
 
     ax.set_ylim(
-        y_min - 0.12 * y_range,
-        y_max + 0.15 * y_range,
+        y_min - 0.30 * y_range,
+        y_max + 0.30 * y_range,
     )
 
     save_figure(fig, output_path)
 
 
 # ============================================================
-# HYDRO PRICE MAPS
+# HYDRO PRICE MAP (reservoir only)
 # ============================================================
 
 def infer_regions_country_column(regions_gdf):
@@ -1105,20 +1293,6 @@ def extract_hydro_country_prices(network):
 
     marginal_prices = network.buses_t.marginal_price.copy()
     result = {}
-
-    ror_units = network.generators[network.generators.carrier == "ror"]
-
-    if not ror_units.empty:
-        ror_generation = network.generators_t.p[ror_units.index].clip(lower=0.0)
-        ror_bus_map = ror_units["bus"]
-
-        result["Run-of-river"] = weighted_average_price_by_country(
-            generation_df=ror_generation,
-            bus_map=ror_bus_map,
-            marginal_prices=marginal_prices,
-        )
-    else:
-        result["Run-of-river"] = pd.Series(dtype=float)
 
     reservoir_units = network.storage_units[network.storage_units.carrier == "hydro"]
 
@@ -1225,13 +1399,6 @@ def plot_hydro_price_map_by_type(hydro_type, map_data_abs, norm, cmap, output_pa
 
     cbar.ax.tick_params(labelsize=12)
 
-    fig.suptitle(
-        f"Country-level average selling price — {hydro_type}",
-        fontsize=16,
-        fontweight="bold",
-        y=0.99,
-    )
-
     save_figure(
         fig,
         output_path,
@@ -1269,19 +1436,15 @@ def make_hydro_price_maps(networks, hydro_results_path, output_dir):
             regions_country_col=regions_country_col,
         )
 
-    hydro_types_to_plot = [
-        "Run-of-river",
-        "Reservoir & Dam",
-    ]
+    hydro_type = "Reservoir & Dam"
 
     all_abs_values = []
 
     for scenario_name in networks.keys():
         merged = map_data_abs[scenario_name]
 
-        for hydro_type in hydro_types_to_plot:
-            if hydro_type in merged.columns:
-                all_abs_values.append(merged[hydro_type])
+        if hydro_type in merged.columns:
+            all_abs_values.append(merged[hydro_type])
 
     all_abs_values = pd.concat(all_abs_values, axis=0)
     all_abs_values = all_abs_values.replace([np.inf, -np.inf], np.nan).dropna()
@@ -1296,20 +1459,131 @@ def make_hydro_price_maps(networks, hydro_results_path, output_dir):
     cmap = plt.cm.viridis
 
     plot_hydro_price_map_by_type(
-        hydro_type="Run-of-river",
-        map_data_abs=map_data_abs,
-        norm=norm,
-        cmap=cmap,
-        output_path=output_dir / "hydro_price_ror.png",
-    )
-
-    plot_hydro_price_map_by_type(
         hydro_type="Reservoir & Dam",
         map_data_abs=map_data_abs,
         norm=norm,
         cmap=cmap,
         output_path=output_dir / "hydro_price_reservoir.png",
     )
+
+
+# ============================================================
+# RESERVOIR SOC vs SYSTEM PRICE (mean-of-three background)
+# ============================================================
+
+def reservoir_soc_twh(network, carrier="hydro"):
+    su = network.storage_units.index[network.storage_units.carrier == carrier]
+
+    if len(su) == 0:
+        raise ValueError(
+            f"No StorageUnit with carrier '{carrier}'. "
+            f"Available: {list(network.storage_units.carrier.unique())}"
+        )
+
+    return network.storage_units_t.state_of_charge[su].sum(axis=1) / 1e6
+
+
+def reservoir_max_capacity_twh(network, carrier="hydro"):
+    su = network.storage_units[network.storage_units.carrier == carrier]
+
+    return (su["p_nom_opt"] * su["max_hours"]).sum() / 1e6
+
+
+def system_price(network, carrier="AC"):
+    buses = network.buses.index[network.buses.carrier == carrier]
+    cols = [b for b in buses if b in network.buses_t.marginal_price.columns]
+
+    return network.buses_t.marginal_price[cols].mean(axis=1)
+
+
+def make_soc_price_figure(networks, output_path, resample="D"):
+    """Reservoir SOC (absolute, TWh) for the three scenarios, over a background
+    heatmap of the mean-of-three system marginal price."""
+    soc_series = {
+        name: reservoir_soc_twh(net)
+        for name, net in networks.items()
+    }
+    max_caps = {
+        name: reservoir_max_capacity_twh(net)
+        for name, net in networks.items()
+    }
+
+    prices = {
+        name: system_price(net).resample(resample).mean()
+        for name, net in networks.items()
+    }
+
+    idx = list(prices.values())[0].index
+
+    mean_price = pd.concat(prices.values(), axis=1).mean(axis=1).reindex(idx)
+
+    soc_series = {
+        name: series.resample(resample).mean().reindex(idx)
+        for name, series in soc_series.items()
+    }
+
+    all_price_vals = np.concatenate([p.reindex(idx).values for p in prices.values()])
+    vmin = np.nanpercentile(all_price_vals, 5)
+    vmax = np.nanpercentile(all_price_vals, 95)
+
+    fig, ax = plt.subplots(figsize=(13, 5.5), facecolor="white")
+
+    top = max(max_caps.values()) * 1.10
+
+    t_num = mdates.date2num(idx.to_pydatetime())
+    ax.imshow(
+        mean_price.values.reshape(1, -1),
+        aspect="auto",
+        cmap="YlOrRd",
+        extent=[t_num[0], t_num[-1], 0, top],
+        alpha=0.45,
+        zorder=0,
+        vmin=vmin,
+        vmax=vmax,
+    )
+
+    for name, soc in soc_series.items():
+        ax.plot(
+            idx, soc.values,
+            label=name,
+            color=SCENARIO_COLORS.get(name),
+            linewidth=2.0,
+            zorder=3,
+        )
+
+    for name, cap in max_caps.items():
+        ax.axhline(
+            cap,
+            color=SCENARIO_COLORS.get(name),
+            linestyle="--",
+            linewidth=1.3,
+            alpha=0.85,
+            zorder=4,
+            label=f"{name} — max ({cap:.0f} TWh)",
+        )
+
+    ax.set_ylabel("Reservoir State-of-Charge [TWh]", fontsize=13)
+    ax.set_xlabel("")
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+    ax.tick_params(labelsize=11)
+    ax.set_ylim(0, top)
+
+    ax.legend(
+        loc="upper left",
+        frameon=True,
+        framealpha=0.95,
+        edgecolor="black",
+        fontsize=10,
+        ncol=1,
+    )
+
+    cbar = fig.colorbar(ax.images[0], ax=ax, pad=0.01, fraction=0.04)
+    cbar.set_label("System marginal price [€/MWh]", fontsize=12)
+
+    fig.tight_layout()
+
+    save_figure(fig, output_path, bbox_inches="tight")
 
 
 # ============================================================
@@ -1643,13 +1917,6 @@ def make_reservoir_spillage_figure(networks, hydro_results_path, output_path):
             bbox_to_anchor=(0.5, 0.98),
         )
 
-    fig.suptitle(
-        "Mean reservoir spillage by reservoir-volume category",
-        fontsize=16,
-        fontweight="bold",
-        y=1.08,
-    )
-
     plt.tight_layout(rect=[0, 0, 1, 0.88])
     plt.subplots_adjust(wspace=0.16)
 
@@ -1693,6 +1960,11 @@ def run_processing_2050(
         output_path=output_dir / "cost_difference.png",
     )
 
+    make_optimal_capacity_pct_figure(
+        networks=networks,
+        output_path=output_dir / "optimal_capacity.png",
+    )
+
     make_capacity_and_supply_figures(
         networks=networks,
         output_dir=output_dir,
@@ -1707,6 +1979,11 @@ def run_processing_2050(
         networks=networks,
         hydro_results_path=hydro_results_path,
         output_dir=output_dir,
+    )
+
+    make_soc_price_figure(
+        networks=networks,
+        output_path=output_dir / "soc_price.png",
     )
 
     make_reservoir_spillage_figure(

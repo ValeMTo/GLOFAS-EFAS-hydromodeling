@@ -230,3 +230,18 @@ __pycache__/
 hydro_results/
 # Local hydro reference data not distributed in repository
 data/pypsa/GloHydroRes_vs1.csv
+
+# Job launcher scripts (local, not distributed)
+*.sh
+
+# Editor/automatic backups
+*.bak
+
+# Downloaded archive and job logs
+data.zip
+logs/
+download_data.*
+unzip_data.*
+
+# All of data/ except the workflow structure already handled above
+data/pypsa/

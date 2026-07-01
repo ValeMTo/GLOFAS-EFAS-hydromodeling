@@ -5,7 +5,7 @@ import logging
 import os
 import urllib.request
 import numpy as np
-
+import shutil
 
 def setup_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(
@@ -55,7 +55,14 @@ def download_file(url: str, destination: Path, overwrite: bool = False) -> None:
     logger.info("Destination: %s", destination)
 
     try:
-        urllib.request.urlretrieve(url, temporary_destination)
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; hydro-modeling/1.0)"},
+        )
+        with urllib.request.urlopen(request) as response, open(
+            temporary_destination, "wb"
+        ) as out_file:
+            shutil.copyfileobj(response, out_file)
         temporary_destination.replace(destination)
     except Exception:
         temporary_destination.unlink(missing_ok=True)

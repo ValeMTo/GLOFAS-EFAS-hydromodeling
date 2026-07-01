@@ -4,19 +4,24 @@ from pathlib import Path
 import argparse
 import json
 import logging
+import re
+import unicodedata
 import warnings
 
 import matplotlib
 matplotlib.use("Agg")
 
 import geopandas as gpd
+import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pypsa
 import os
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.colors import LinearSegmentedColormap, Normalize, TwoSlopeNorm
+from shapely.geometry import Point
 from hydro_inflow.utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -99,9 +104,72 @@ MIN_REGIONAL_WEEKLY_COVERAGE = MIN_PERIOD_COVERAGE
 MIN_COUNTRIES_PER_TIMESTEP = 1
 MIN_MEAN_COUNTRIES_PER_WEEK = 1.0
 
+# Figure 2 keeps the aggregated Nordic region. The old aggregated Alpine
+# region has been replaced by the CH / AT / North-Italy 3-panel figure.
 SELECTED_REGIONS = {
     "Nordic countries": ["FI", "SE", "NO"],
-    "Alpine countries": ["IT", "AT", "CH"],
+}
+
+# ------------------------------------------------------------
+# North-Italy (bidding-zone) pipeline settings
+# ------------------------------------------------------------
+
+GADM_NAME_COL = "NAME_1"
+
+NORD_REGIONS = {
+    "piemonte", "valle daosta", "liguria", "lombardia",
+    "trentino alto adige", "veneto", "friuli venezia giulia", "emilia romagna",
+}
+
+GADM_SYNONYMS = {
+    "valledaosta": "valle daosta",
+    "aosta valley": "valle daosta",
+    "trentino altoadige": "trentino alto adige",
+    "trentino alto adige sudtirol": "trentino alto adige",
+    "friuli veneziagiulia": "friuli venezia giulia",
+    "sicily": "sicilia",
+    "apulia": "puglia",
+}
+
+ALL_ITALIAN_REGIONS = NORD_REGIONS | {
+    "toscana", "umbria", "marche", "lazio", "abruzzo", "campania",
+    "molise", "puglia", "basilicata", "calabria", "sicilia", "sardegna",
+}
+
+# bus -> group manual override, e.g. {"IT2 1": "NORD"}
+BUS_GROUP_OVERRIDE = {}
+
+# Italian bidding zone used as North reference (ENTSO-E)
+ITALY_NORTH_ZONE = "IT_North"
+ITALY_ZONE_COMPONENT = "Total"   # Total = RoR + Reservoir (excludes PHS)
+
+# ------------------------------------------------------------
+# Supplementary multi-country panels (figure 5)
+# ------------------------------------------------------------
+
+COUNTRY_NAMES = {
+    "NO": "Norway", "SE": "Sweden", "FI": "Finland",
+    "CH": "Switzerland", "AT": "Austria", "IT": "Italy",
+    "DE": "Germany", "FR": "France", "ES": "Spain",
+    "PT": "Portugal", "NL": "Netherlands", "BE": "Belgium",
+    "PL": "Poland", "CZ": "Czech Republic", "SK": "Slovakia",
+    "HU": "Hungary", "RO": "Romania", "HR": "Croatia",
+    "SI": "Slovenia", "GR": "Greece", "BG": "Bulgaria",
+    "DK": "Denmark", "LT": "Lithuania", "LV": "Latvia",
+    "EE": "Estonia", "GB": "Great Britain", "IE": "Ireland",
+    "LU": "Luxembourg", "RS": "Serbia", "AL": "Albania",
+    "BA": "Bosnia & Herz.", "ME": "Montenegro",
+    "MK": "N. Macedonia",
+}
+
+SUPPLEMENTARY_PANEL_GROUPS = {
+    "group1": ["NO", "SE", "FI", "MK"],
+    "group2": ["FR", "CH", "AT", "IT"],
+    "group3": ["ES", "PT", "GB", "IE"],
+    "group4": ["DE", "PL", "CZ", "SK"],
+    "group5": ["RO", "BG", "HU", "GR"],
+    "group6": ["HR", "RS", "SI", "BA"],
+    "group7": ["BE", "LT", "LV", "ME"],
 }
 
 # ============================================================
@@ -159,7 +227,7 @@ def parse_args():
         "--entsoe-production",
         type=Path,
         default=None,
-        help="Path to ENTSO-E hydro production CSV files.",
+        help="Path to ENTSO-E hydro production CSV files (per-country).",
     )
 
     parser.add_argument(
@@ -167,6 +235,27 @@ def parse_args():
         type=Path,
         default=None,
         help="Path to Electricity Maps JSON files.",
+    )
+
+    parser.add_argument(
+        "--gadm-italy",
+        type=Path,
+        default=None,
+        help="Path to GADM level-1 Italy file (gadm41_ITA_1.json).",
+    )
+
+    parser.add_argument(
+        "--glohydrores",
+        type=Path,
+        default=None,
+        help="Path to GloHydroRes CSV (GloHydroRes_vs1.csv).",
+    )
+
+    parser.add_argument(
+        "--italy-zone-production",
+        type=Path,
+        default=None,
+        help="Path to ENTSO-E Italian bidding-zone production CSV files.",
     )
 
     parser.add_argument(
@@ -196,8 +285,18 @@ def save_figure(fig, output_path):
     plt.close(fig)
 
 
-def clean_metric_name(model_name):
-    return model_name.replace("-", "_").replace(" ", "_")
+def model_key(model_name):
+    """Canonical column-safe key for a model name.
+
+    Must match the key used to build the KGESS map columns.
+    'PyPSA + GloFAS-SABER' -> 'PyPSA_plus_GloFAS_SABER'.
+    """
+    return (
+        model_name
+        .replace("+", "plus")
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
 
 
 # ============================================================
@@ -219,7 +318,7 @@ def load_networks(base_path, folder_template, years, network_file, engine="netcd
 
 
 # ============================================================
-# ENTSO-E LOADING AND PROCESSING
+# ENTSO-E LOADING AND PROCESSING (per-country)
 # ============================================================
 
 def load_ch_hydro_hourly_mw_from_electricity_maps(json_path, year):
@@ -439,7 +538,7 @@ def load_entsoe_hydro_data(entsoe_production_path, electricity_maps_path):
 
 
 # ============================================================
-# MODEL HYDRO EXTRACTION
+# MODEL HYDRO EXTRACTION (per-country)
 # ============================================================
 
 def get_country_from_bus(bus_name):
@@ -761,7 +860,7 @@ def compute_country_weekly_metrics(entsoe_all, model_all):
                 df_weekly_metric[model_name],
             )
 
-            metric_name = clean_metric_name(model_name)
+            metric_name = model_key(model_name)
 
             country_results[f"KGESS_{metric_name}"] = kgess_model
             country_results[f"N_WEEKS_{metric_name}"] = int(
@@ -777,7 +876,7 @@ def compute_country_weekly_metrics(entsoe_all, model_all):
 
     results_df_weekly = pd.DataFrame(results_weekly).set_index("Country")
 
-    sort_column = f"KGESS_{clean_metric_name(ACTIVE_MODELS[0])}"
+    sort_column = f"KGESS_{model_key(ACTIVE_MODELS[0])}"
 
     if sort_column in results_df_weekly.columns:
         results_df_weekly = results_df_weekly.sort_values(
@@ -1022,7 +1121,7 @@ def plot_weekly_series(df_weekly, kgess_values, title_prefix, output_path, count
 
 
 # ============================================================
-# REGIONAL WEEKLY FIGURES
+# REGIONAL WEEKLY FIGURES (aggregated)
 # ============================================================
 
 def build_region_weekly_series(entsoe_all, model_all, requested_countries):
@@ -1173,7 +1272,540 @@ def build_region_weekly_series(entsoe_all, model_all, requested_countries):
 
 
 # ============================================================
-# COUNTRY KGESS MAP
+# NORTH-ITALY (BIDDING ZONE) PIPELINE
+# ============================================================
+
+def _normalize_region_name(name):
+    s = str(name).split("/")[0]
+    s = "".join(
+        c for c in unicodedata.normalize("NFKD", s)
+        if not unicodedata.combining(c)
+    )
+    s = s.lower().strip().replace("'", "")
+    s = re.sub(r"[-_.]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    return GADM_SYNONYMS.get(s, s)
+
+
+def build_nord_polygon(gadm_italy_path):
+    """Dissolved polygon of the Italian 'North' bidding-zone regions."""
+    if not gadm_italy_path.exists():
+        raise FileNotFoundError(f"Missing GADM Italy file: {gadm_italy_path}")
+
+    regions = gpd.read_file(gadm_italy_path).to_crs(4326)
+    regions["norm"] = regions[GADM_NAME_COL].map(_normalize_region_name)
+
+    unmatched = set(regions["norm"]) - ALL_ITALIAN_REGIONS
+    if unmatched:
+        logger.warning("Unrecognised GADM region names: %s", unmatched)
+
+    regions["is_nord"] = regions["norm"].isin(NORD_REGIONS)
+
+    n_found = int(regions["is_nord"].sum())
+    logger.info("North-Italy regions found: %d / %d", n_found, len(NORD_REGIONS))
+
+    nord_poly = regions[regions["is_nord"]].dissolve().geometry.iloc[0]
+
+    return nord_poly
+
+
+def build_bus_group(network, nord_poly):
+    """Map each Italian bus to 'NORD' or 'RESTO' by point-in-polygon."""
+    buses = network.buses
+
+    if "country" in buses.columns:
+        it_buses = buses[buses["country"] == "IT"]
+    else:
+        it_buses = buses[buses.index.astype(str).str.startswith("IT")]
+
+    def assign_group(x, y):
+        return "NORD" if nord_poly.contains(Point(x, y)) else "RESTO"
+
+    bus_group = pd.Series(
+        {
+            b: assign_group(it_buses.loc[b, "x"], it_buses.loc[b, "y"])
+            for b in it_buses.index
+        },
+        name="group",
+    )
+
+    for b, g in BUS_GROUP_OVERRIDE.items():
+        if b in bus_group.index:
+            bus_group[b] = g
+
+    logger.info("Bus group counts: %s", bus_group.value_counts().to_dict())
+
+    return bus_group, it_buses
+
+
+def _plant_name_from_index(idx):
+    m = re.search(r"hydro\s+\d+\s+(.+)$", str(idx))
+    return m.group(1).strip() if m else None
+
+
+def _norm_plant_name(s):
+    s = str(s).lower().strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def build_reservoir_group(network, glohydrores_path, nord_poly, bus_group, it_buses):
+    """Map each Italian reservoir storage unit to 'NORD' / 'RESTO'.
+
+    Assignment is by GloHydroRes plant coordinates when the plant name can be
+    matched, otherwise it falls back to the group of the unit's bus.
+    """
+    if not glohydrores_path.exists():
+        raise FileNotFoundError(f"Missing GloHydroRes file: {glohydrores_path}")
+
+    su = network.storage_units
+    res = su[
+        (su["carrier"] == "hydro") & (su["bus"].isin(it_buses.index))
+    ].copy()
+
+    res["plant_name"] = res.index.to_series().map(_plant_name_from_index)
+
+    ghr = pd.read_csv(glohydrores_path)
+    ghr_it = ghr[ghr["country"] == "Italy"].copy()
+
+    exact_lookup = ghr_it.set_index("name")[["plant_lat", "plant_lon"]]
+    norm_lookup = (
+        ghr_it.assign(_n=ghr_it["name"].map(_norm_plant_name))
+        .drop_duplicates("_n")
+        .set_index("_n")[["plant_lat", "plant_lon"]]
+    )
+
+    def match_plant(name):
+        if name is None:
+            return (None, None, "no_name")
+        if name in exact_lookup.index:
+            r = exact_lookup.loc[name]
+            return (float(r["plant_lat"]), float(r["plant_lon"]), "exact")
+        nn = _norm_plant_name(name)
+        if nn in norm_lookup.index:
+            r = norm_lookup.loc[nn]
+            return (float(r["plant_lat"]), float(r["plant_lon"]), "norm")
+        return (None, None, "unmatched")
+
+    matched = res["plant_name"].map(match_plant)
+    res["lat"] = [m[0] for m in matched]
+    res["lon"] = [m[1] for m in matched]
+    res["match"] = [m[2] for m in matched]
+
+    def assign(row):
+        if pd.notna(row["lat"]) and pd.notna(row["lon"]):
+            g = "NORD" if nord_poly.contains(Point(row["lon"], row["lat"])) else "RESTO"
+            return pd.Series([g, "coord"])
+        return pd.Series([bus_group.get(row["bus"], "RESTO"), "bus_fallback"])
+
+    res[["group", "group_src"]] = res.apply(assign, axis=1)
+
+    logger.info("Reservoir group counts: %s", res["group"].value_counts().to_dict())
+    logger.info(
+        "Reservoir assignment source: %s",
+        res["group_src"].value_counts().to_dict(),
+    )
+
+    reservoir_group = res[
+        ["bus", "plant_name", "lat", "lon", "match", "group", "group_src"]
+    ]
+
+    return reservoir_group
+
+
+def extract_group_production(net, hydro_type, bus_group, reservoir_group):
+    """Hourly production per group (NORD / RESTO) from one network."""
+    parts = []
+
+    if hydro_type in ("ror", "total_no_phs"):
+        gen = net.generators
+        ror = gen[(gen["carrier"] == "ror") & (gen["bus"].isin(bus_group.index))]
+
+        if not ror.empty:
+            g = ror["bus"].map(bus_group)
+            keep = g.notna()
+            ror, g = ror[keep.values], g[keep]
+
+            if not ror.empty:
+                p = net.generators_t.p[ror.index].clip(lower=0.0)
+                parts.append(p.T.groupby(g).sum().T)
+
+    if hydro_type in ("reservoir", "total_no_phs"):
+        su = net.storage_units
+        res = su[(su["carrier"] == "hydro") & (su["bus"].isin(bus_group.index))]
+
+        if not res.empty:
+            g = res.index.to_series().map(reservoir_group["group"])
+            miss = g.isna()
+
+            if miss.any():
+                g.loc[miss] = res.loc[miss, "bus"].map(bus_group)
+
+            keep = g.notna()
+            res, g = res[keep.values], g[keep]
+
+            if not res.empty:
+                p = net.storage_units_t.p[res.index].clip(lower=0.0)
+                parts.append(p.T.groupby(g).sum().T)
+
+    if not parts:
+        return pd.DataFrame(index=net.snapshots)
+
+    out = pd.concat(parts, axis=1)
+    out = out.T.groupby(level=0).sum().T
+    out = out.clip(lower=0.0)
+
+    return out
+
+
+def build_model_group_series(networks_by_year, years, hydro_type, bus_group, reservoir_group):
+    """Concatenated NORD/RESTO production series across years for one model."""
+    yearly = []
+
+    for year in years:
+        df = extract_group_production(
+            networks_by_year[year],
+            hydro_type,
+            bus_group,
+            reservoir_group,
+        ).copy()
+
+        df.index = pd.to_datetime(df.index)
+        yearly.append(df.sort_index())
+
+    full = pd.concat(yearly, axis=0).sort_index()
+
+    for col in ["NORD", "RESTO"]:
+        if col not in full.columns:
+            full[col] = 0.0
+
+    return full[["NORD", "RESTO"]]
+
+
+def build_all_model_group_series(model_networks, bus_group, reservoir_group):
+    model_groups = {}
+
+    for model_name, networks_by_year in model_networks.items():
+        model_groups[model_name] = build_model_group_series(
+            networks_by_year=networks_by_year,
+            years=NET_YEARS,
+            hydro_type=HYDRO_TYPE,
+            bus_group=bus_group,
+            reservoir_group=reservoir_group,
+        )
+
+    return model_groups
+
+
+def load_italy_north_reference(italy_zone_path, zone=ITALY_NORTH_ZONE, component=ITALY_ZONE_COMPONENT):
+    """ENTSO-E hourly reference for one Italian bidding zone, across all years.
+
+    For component 'Total' the series is rebuilt as RoR + Reservoir, excluding
+    pumped hydro (PHS), to match the model 'total_no_phs' definition.
+    """
+    frames = []
+
+    for year in ENTSOE_YEARS:
+        fp = italy_zone_path / f"Italy_{zone}_{year}.csv"
+
+        if not fp.exists():
+            continue
+
+        df = pd.read_csv(fp, index_col=0)
+        df.index = (
+            pd.to_datetime(df.index, utc=True)
+            .tz_convert(None)
+            .floor("h")
+        )
+        df = df[~df.index.duplicated(keep="first")]
+
+        if component == "Total":
+            cols = [c for c in ["RoR", "Reservoir"] if c in df.columns]
+            if cols:
+                frames.append(df[cols].astype(float).sum(axis=1, min_count=1))
+        else:
+            if component in df.columns:
+                frames.append(df[component].astype(float))
+
+    if not frames:
+        return None
+
+    return pd.concat(frames).sort_index()
+
+
+# ============================================================
+# CH / AT / NORTH-ITALY 3-PANEL FIGURE  (figure 3)
+# ============================================================
+
+def _country_panel_sources(country_code, hydro_data_nopumped, country_model_frames):
+    obs_parts = [
+        df[f"{country_code}_Total"]
+        for df in hydro_data_nopumped.values()
+        if f"{country_code}_Total" in df.columns
+    ]
+    obs = pd.concat(obs_parts).sort_index() if obs_parts else None
+
+    models = {
+        name: frame[country_code]
+        for name, frame in country_model_frames.items()
+        if country_code in frame.columns
+    }
+
+    return obs, models
+
+
+def _north_italy_panel_sources(italy_north_obs, model_groups):
+    models = {name: model_groups[name]["NORD"] for name in model_groups}
+    return italy_north_obs, models
+
+
+def _build_panel_weekly(obs, models):
+    if obs is None:
+        return None
+
+    cols = {"ENTSOE": obs}
+    for name in ACTIVE_MODELS:
+        if name in models:
+            cols[name] = models[name]
+
+    df = pd.concat(cols, axis=1, join="outer").dropna(subset=["ENTSOE"])
+
+    if df.empty:
+        return None
+
+    return df.resample("W").mean()
+
+
+def plot_country_model_panels(panels, output_path, per_row_height=2.6, fixed_width=14.0):
+    """Stacked weekly panels (one per location). Values in GW."""
+    n = len(panels)
+
+    fig, axes = plt.subplots(
+        n, 1,
+        figsize=(fixed_width, per_row_height * n),
+        sharex=True,
+        facecolor="white",
+    )
+
+    if n == 1:
+        axes = [axes]
+
+    weekly_all = {
+        label: _build_panel_weekly(obs, models)
+        for (label, obs, models) in panels
+    }
+
+    all_dates = pd.DatetimeIndex([])
+    for dfw in weekly_all.values():
+        if dfw is not None:
+            all_dates = all_dates.union(dfw.index)
+
+    for ax, (label, obs, models) in zip(axes, panels):
+        dfw = weekly_all[label]
+
+        if dfw is None:
+            ax.text(
+                0.5, 0.5, f"{label}: no data",
+                ha="center", va="center",
+                transform=ax.transAxes, fontsize=12, color="gray",
+            )
+            ax.set_ylabel("Power (GW)", fontsize=11)
+            continue
+
+        ax.plot(
+            dfw.index, dfw["ENTSOE"] / 1e3,
+            color="black", linewidth=2.5, label="ENTSO-E", zorder=5,
+        )
+
+        kgess_parts = []
+        for name in ACTIVE_MODELS:
+            if name not in dfw.columns:
+                continue
+
+            valid = dfw[["ENTSOE", name]].dropna()
+            if len(valid) >= 4:
+                kg = kgess(valid["ENTSOE"].values, valid[name].values)
+                kgess_parts.append(f"{name} = {kg:.2f}")
+            else:
+                kgess_parts.append(f"{name} = n/a")
+
+            ax.plot(
+                dfw.index, dfw[name] / 1e3,
+                color=MODEL_COLORS.get(name, "#999999"),
+                linewidth=MODEL_LINEWIDTHS.get(name, 1.8),
+                alpha=MODEL_ALPHA.get(name, 0.85),
+                label=name, zorder=4,
+            )
+
+        for yr in sorted(dfw.index.year.unique()):
+            ax.axvline(
+                pd.Timestamp(f"{yr}-01-01"),
+                color="gray", linestyle="--",
+                linewidth=0.7, alpha=0.35, zorder=1,
+            )
+
+        ax.set_title(
+            f"{label}    KGESS → " + "  |  ".join(kgess_parts),
+            fontsize=12, fontweight="bold", loc="left", pad=6,
+        )
+        ax.set_ylabel("Power (GW)", fontsize=11)
+        ax.tick_params(axis="both", labelsize=10)
+        ax.grid(True, alpha=0.25, linewidth=0.6)
+        ax.set_axisbelow(True)
+
+        if len(all_dates):
+            ax.set_xlim(all_dates.min(), all_dates.max())
+
+    axes[-1].xaxis.set_major_locator(mdates.MonthLocator(bymonth=[1, 4, 7, 10]))
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%b"))
+    fig.autofmt_xdate(rotation=30, ha="right")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels,
+        loc="lower center",
+        ncol=len(ACTIVE_MODELS) + 1,
+        fontsize=11, frameon=True, framealpha=0.95, edgecolor="black",
+        bbox_to_anchor=(0.5, 0.0),
+    )
+
+    fig.subplots_adjust(left=0.07, right=0.97, top=0.95, bottom=0.16, hspace=0.30)
+
+    save_figure(fig, output_path)
+
+
+# ============================================================
+# SUPPLEMENTARY MULTI-COUNTRY PANELS  (figure 5)
+# ============================================================
+
+def build_country_weekly_df(country, entsoe_all, model_all):
+    entsoe_col = f"{country}_{ENTSOE_SUFFIX}"
+
+    if entsoe_col not in entsoe_all.columns:
+        return None
+
+    series_list = [entsoe_all[entsoe_col].rename("ENTSOE")]
+
+    for model_name in ACTIVE_MODELS:
+        df_model = model_all[model_name]
+        if country in df_model.columns:
+            series_list.append(df_model[country].rename(model_name))
+        else:
+            series_list.append(
+                pd.Series(pd.NA, index=entsoe_all.index, name=model_name)
+            )
+
+    df = pd.concat(series_list, axis=1, join="outer").dropna(how="all")
+    df = df.dropna(subset=["ENTSOE"])
+
+    if df.empty:
+        return None
+
+    return df.resample("W").mean()
+
+
+def plot_supplementary_group(group_name, countries, entsoe_all, model_all, output_path,
+                             per_row_height=3.8, fixed_width=14.0):
+    n = len(countries)
+
+    fig, axes = plt.subplots(
+        n, 1,
+        figsize=(fixed_width, per_row_height * n),
+        sharex=True,
+        facecolor="white",
+    )
+
+    if n == 1:
+        axes = [axes]
+
+    weekly_dfs = {
+        country: build_country_weekly_df(country, entsoe_all, model_all)
+        for country in countries
+    }
+
+    all_dates = pd.DatetimeIndex([])
+    for dfw in weekly_dfs.values():
+        if dfw is not None:
+            all_dates = all_dates.union(dfw.index)
+
+    for ax, country in zip(axes, countries):
+        dfw = weekly_dfs[country]
+
+        if dfw is None:
+            ax.text(
+                0.5, 0.5, f"{country}: no data",
+                ha="center", va="center",
+                transform=ax.transAxes, fontsize=12, color="gray",
+            )
+            ax.set_ylabel("Power (GW)", fontsize=11)
+            continue
+
+        ax.plot(
+            dfw.index, dfw["ENTSOE"] / 1e3,
+            color="black", linewidth=2.5, label="ENTSO-E", zorder=5,
+        )
+
+        kgess_parts = []
+        for model_name in ACTIVE_MODELS:
+            if model_name not in dfw.columns:
+                continue
+
+            valid = dfw[["ENTSOE", model_name]].dropna()
+            if len(valid) >= 4:
+                kg = kgess(valid["ENTSOE"].values, valid[model_name].values)
+                kgess_parts.append(f"{model_name} = {kg:.2f}")
+            else:
+                kgess_parts.append(f"{model_name} = n/a")
+
+            ax.plot(
+                dfw.index, dfw[model_name] / 1e3,
+                color=MODEL_COLORS.get(model_name, "#999999"),
+                linewidth=MODEL_LINEWIDTHS.get(model_name, 1.8),
+                alpha=MODEL_ALPHA.get(model_name, 0.85),
+                label=model_name, zorder=4,
+            )
+
+        for yr in sorted(dfw.index.year.unique()):
+            ax.axvline(
+                pd.Timestamp(f"{yr}-01-01"),
+                color="gray", linestyle="--",
+                linewidth=0.7, alpha=0.35, zorder=1,
+            )
+
+        country_label = COUNTRY_NAMES.get(country, country)
+        ax.set_title(
+            f"{country_label}    KGESS → " + "  |  ".join(kgess_parts),
+            fontsize=12, fontweight="bold", loc="left", pad=6,
+        )
+        ax.set_ylabel("Power (GW)", fontsize=11)
+        ax.tick_params(axis="both", labelsize=10)
+        ax.grid(True, alpha=0.25, linewidth=0.6)
+        ax.set_axisbelow(True)
+
+        if len(all_dates):
+            ax.set_xlim(all_dates.min(), all_dates.max())
+
+    axes[-1].xaxis.set_major_locator(mdates.MonthLocator(bymonth=[1, 4, 7, 10]))
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%b"))
+    fig.autofmt_xdate(rotation=30, ha="right")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels,
+        loc="lower center",
+        ncol=len(ACTIVE_MODELS) + 1,
+        fontsize=11, frameon=True, framealpha=0.95, edgecolor="black",
+        bbox_to_anchor=(0.5, 0.0),
+    )
+
+    fig.subplots_adjust(left=0.07, right=0.97, top=0.97, bottom=0.10, hspace=0.18)
+
+    save_figure(fig, output_path)
+
+
+# ============================================================
+# COUNTRY KGESS MAP  (figure 4 — red/blue diverging, version 2)
 # ============================================================
 
 def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_path, output_path):
@@ -1192,7 +1824,8 @@ def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_pat
 
     if "name" not in regions.columns:
         raise ValueError(
-            f"Column 'name' not found in {regions_path}. Available columns: {list(regions.columns)}"
+            f"Column 'name' not found in {regions_path}. "
+            f"Available columns: {list(regions.columns)}"
         )
 
     df = results_df_weekly.copy()
@@ -1201,50 +1834,42 @@ def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_pat
     regions["Country"] = regions["name"]
     gdf = regions.merge(df, on="Country", how="left")
 
-    metric_cols = [
-        "KGESS_PyPSA_baseline",
-        "KGESS_PyPSA_+_GloFAS_SABER",
-        "KGESS_PyPSA_+_EFAS_SABER",
-    ]
+    # Centroids in a projected CRS, converted back for label placement.
+    if gdf.crs is None:
+        gdf = gdf.set_crs(4326)
+    centroids = gdf.geometry.to_crs(3035).centroid.to_crs(4326)
+    gdf["centroid_x"] = centroids.x
+    gdf["centroid_y"] = centroids.y
 
-    titles = [
-        f"PyPSA Baseline by Country ({min(available_years)}-{max(available_years)})",
-        f"PyPSA + GloFAS-SABER by Country ({min(available_years)}-{max(available_years)})",
-        f"PyPSA + EFAS-SABER by Country ({min(available_years)}-{max(available_years)})",
-    ]
-
-    blue_cmap = LinearSegmentedColormap.from_list(
-        "white_to_blue",
-        [
-            "#ffffff",
-            "#deebf7",
-            "#9ecae1",
-            "#3182bd",
-            "#08519c",
-        ],
-    )
-
-    vmin = 0.0
-    vmax = 1.0
-    nodata_color = "#bdbdbd"
+    metric_cols = [f"KGESS_{model_key(m)}" for m in ACTIVE_MODELS]
+    subplot_titles = list(ACTIVE_MODELS)
 
     missing_cols = [col for col in metric_cols if col not in gdf.columns]
-
     if missing_cols:
         raise ValueError(f"Missing metric columns in results_df_weekly: {missing_cols}")
 
-    for metric_col in metric_cols:
-        gdf[f"{metric_col}_plot"] = gdf[metric_col].copy()
+    nodata_color = "#d9d9d9"
+    europe_xlim = (-12, 35)
+    europe_ylim = (34, 72)
+    label_fontsize = 8
 
-        gdf.loc[gdf[metric_col].notna(), f"{metric_col}_plot"] = (
-            gdf.loc[gdf[metric_col].notna(), metric_col]
-            .clip(lower=vmin, upper=vmax)
-        )
+    # Diverging red-white-blue colormap, symmetric around 0.
+    rb_cmap = LinearSegmentedColormap.from_list(
+        "red_white_blue",
+        [
+            "#d73027", "#f46d43", "#fdae61", "#ffffff",
+            "#9ecae1", "#3182bd", "#08519c",
+        ],
+    )
+
+    all_vals = gdf[metric_cols].stack().dropna()
+    abs_max = max(abs(all_vals.min()), abs(all_vals.max()), 0.01)
+    norm = TwoSlopeNorm(vmin=-abs_max, vcenter=0.0, vmax=abs_max)
 
     fig, axes = plt.subplots(1, 3, figsize=(22, 8))
-    plt.subplots_adjust(wspace=0.08, right=0.88)
+    plt.subplots_adjust(wspace=0.05, right=0.88, left=0.02, top=0.93, bottom=0.02)
 
-    for ax, metric_col, title in zip(axes, metric_cols, titles):
+    for ax, metric_col, title in zip(axes, metric_cols, subplot_titles):
         gdf_nodata = gdf[gdf[metric_col].isna()]
         gdf_valid = gdf[gdf[metric_col].notna()]
 
@@ -1257,25 +1882,56 @@ def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_pat
 
         gdf_valid.plot(
             ax=ax,
-            column=f"{metric_col}_plot",
-            cmap=blue_cmap,
-            vmin=vmin,
-            vmax=vmax,
+            column=metric_col,
+            cmap=rb_cmap,
+            norm=norm,
             edgecolor="black",
             linewidth=0.5,
+            missing_kwds={"color": nodata_color},
         )
 
-        ax.set_title(title, fontsize=15, fontweight="bold")
+        for _, row in gdf.iterrows():
+            val = row[metric_col]
+            if isinstance(val, float) and np.isnan(val):
+                continue
+            try:
+                label = f"{float(val):.2f}"
+                norm_val = norm(float(val))
+                text_color = "white" if norm_val > 0.85 or norm_val < 0.15 else "black"
+                ax.annotate(
+                    label,
+                    xy=(row["centroid_x"], row["centroid_y"]),
+                    ha="center", va="center",
+                    fontsize=label_fontsize,
+                    color=text_color,
+                    fontweight="bold",
+                    clip_on=True,
+                )
+            except (ValueError, TypeError):
+                pass
+
+        ax.set_xlim(*europe_xlim)
+        ax.set_ylim(*europe_ylim)
+        ax.set_title(title, fontsize=13, fontweight="bold", pad=6)
         ax.axis("off")
 
-    norm = Normalize(vmin=vmin, vmax=vmax)
-    sm = ScalarMappable(norm=norm, cmap=blue_cmap)
+    sm = ScalarMappable(norm=norm, cmap=rb_cmap)
     sm.set_array([])
 
-    cax = fig.add_axes([0.90, 0.18, 0.018, 0.64])
+    cax = fig.add_axes([0.90, 0.18, 0.016, 0.64])
     cbar = fig.colorbar(sm, cax=cax)
-    cbar.set_label("KGESS", fontsize=14)
-    cbar.ax.tick_params(labelsize=13)
+    cbar.set_label("KGESS", fontsize=13)
+    cbar.ax.tick_params(labelsize=11)
+
+    patch = mpatches.Patch(color=nodata_color, label="No data")
+    fig.legend(
+        handles=[patch],
+        loc="lower right",
+        bbox_to_anchor=(0.995, 0.02),
+        fontsize=10,
+        frameon=True,
+        edgecolor="black",
+    )
 
     save_figure(fig, output_path)
 
@@ -1288,6 +1944,9 @@ def run_processing_historical(
     hydro_results_path: Path | None = None,
     entsoe_production_path: Path | None = None,
     electricity_maps_path: Path | None = None,
+    gadm_italy_path: Path | None = None,
+    glohydrores_path: Path | None = None,
+    italy_zone_path: Path | None = None,
     output_dir: Path | None = None,
 ) -> None:
     hydro_results_path = (
@@ -1310,6 +1969,24 @@ def run_processing_historical(
         else data_root / "hydro_global" / "ENTSOE" / "ElectricityMaps"
     )
 
+    gadm_italy_path = (
+        gadm_italy_path.resolve()
+        if gadm_italy_path is not None
+        else data_root / "hydro_global" / "GADM" / "gadm41_ITA_1.json"
+    )
+
+    glohydrores_path = (
+        glohydrores_path.resolve()
+        if glohydrores_path is not None
+        else data_root / "hydro_global" / "GloHydroRes" / "GloHydroRes_vs1.csv"
+    )
+
+    italy_zone_path = (
+        italy_zone_path.resolve()
+        if italy_zone_path is not None
+        else data_root / "hydro_global" / "ENTSOE" / "Italia_BiddingZone"
+    )
+
     output_dir = (
         output_dir.resolve()
         if output_dir is not None
@@ -1317,12 +1994,18 @@ def run_processing_historical(
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    supplementary_dir = output_dir / "supplementary"
+    supplementary_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Hydro results path: %s", hydro_results_path)
     logger.info("ENTSO-E production path: %s", entsoe_production_path)
     logger.info("Electricity Maps path: %s", electricity_maps_path)
+    logger.info("GADM Italy path: %s", gadm_italy_path)
+    logger.info("GloHydroRes path: %s", glohydrores_path)
+    logger.info("Italy bidding-zone production path: %s", italy_zone_path)
     logger.info("Historical output directory: %s", output_dir)
 
+    # --- networks ---
     pypsa_networks = load_networks(
         base_path=hydro_results_path,
         folder_template=NETWORK_FOLDERS["pypsa"],
@@ -1344,6 +2027,7 @@ def run_processing_historical(
         network_file=NETWORK_FILE,
     )
 
+    # --- per-country ENTSO-E and model timeseries ---
     hydro_data_nopumped, _, _ = load_entsoe_hydro_data(
         entsoe_production_path=entsoe_production_path,
         electricity_maps_path=electricity_maps_path,
@@ -1376,11 +2060,15 @@ def run_processing_historical(
     entsoe_all = build_entsoe_all(hydro_data_nopumped)
     model_all = build_model_all(model_datasets)
 
+    # --- weekly country metrics (used by the KGESS map) ---
     results_df_weekly = compute_country_weekly_metrics(
         entsoe_all=entsoe_all,
         model_all=model_all,
     )
 
+    # ---------------------------------------------------------
+    # Figure 1 — Europe weekly
+    # ---------------------------------------------------------
     df_weekly_eu, kgess_values_eu, available_years = build_europe_weekly_series(
         entsoe_all=entsoe_all,
         model_all=model_all,
@@ -1393,6 +2081,9 @@ def run_processing_historical(
         output_path=output_dir / "historical_europe_weekly_hydro.png",
     )
 
+    # ---------------------------------------------------------
+    # Figure 2 — aggregated regions (Nordic)
+    # ---------------------------------------------------------
     for region_name, requested_countries in SELECTED_REGIONS.items():
         df_weekly_region, kgess_values_region, countries_used = build_region_weekly_series(
             entsoe_all=entsoe_all,
@@ -1414,6 +2105,70 @@ def run_processing_historical(
             output_path=output_dir / output_name,
         )
 
+    # ---------------------------------------------------------
+    # Figure 3 — CH / AT / North-Italy 3-panel
+    # ---------------------------------------------------------
+    nord_poly = build_nord_polygon(gadm_italy_path)
+
+    bus_group, it_buses = build_bus_group(pypsa_networks[NET_YEARS[0]], nord_poly)
+
+    reservoir_group = build_reservoir_group(
+        network=pypsa_networks[NET_YEARS[0]],
+        glohydrores_path=glohydrores_path,
+        nord_poly=nord_poly,
+        bus_group=bus_group,
+        it_buses=it_buses,
+    )
+
+    model_networks = {
+        "PyPSA baseline": pypsa_networks,
+        "PyPSA + GloFAS-SABER": glofas_saber_networks,
+        "PyPSA + EFAS-SABER": efas_saber_networks,
+    }
+
+    model_groups = build_all_model_group_series(
+        model_networks=model_networks,
+        bus_group=bus_group,
+        reservoir_group=reservoir_group,
+    )
+
+    italy_north_obs = load_italy_north_reference(italy_zone_path)
+    if italy_north_obs is None:
+        logger.warning(
+            "No ENTSO-E bidding-zone data found in %s; North-Italy panel will be empty.",
+            italy_zone_path,
+        )
+
+    country_model_frames = {
+        "PyPSA baseline": pypsa_hydro,
+        "PyPSA + GloFAS-SABER": glofas_saber_hydro,
+        "PyPSA + EFAS-SABER": efas_saber_hydro,
+    }
+
+    ch_obs, ch_models = _country_panel_sources(
+        "CH", hydro_data_nopumped, country_model_frames
+    )
+    at_obs, at_models = _country_panel_sources(
+        "AT", hydro_data_nopumped, country_model_frames
+    )
+    it_north_obs, it_north_models = _north_italy_panel_sources(
+        italy_north_obs, model_groups
+    )
+
+    panels = [
+        ("Switzerland", ch_obs, ch_models),
+        ("Austria", at_obs, at_models),
+        ("North Italy", it_north_obs, it_north_models),
+    ]
+
+    plot_country_model_panels(
+        panels=panels,
+        output_path=output_dir / "historical_ch_at_northitaly_weekly_hydro.png",
+    )
+
+    # ---------------------------------------------------------
+    # Figure 4 — KGESS country map (red/blue diverging)
+    # ---------------------------------------------------------
     plot_country_kgess_map(
         results_df_weekly=results_df_weekly,
         available_years=available_years,
@@ -1421,8 +2176,21 @@ def run_processing_historical(
         output_path=output_dir / "historical_kgess_country_map.png",
     )
 
+    # ---------------------------------------------------------
+    # Figure 5 — supplementary multi-country panels
+    # ---------------------------------------------------------
+    for group_name, countries in SUPPLEMENTARY_PANEL_GROUPS.items():
+        plot_supplementary_group(
+            group_name=group_name,
+            countries=countries,
+            entsoe_all=entsoe_all,
+            model_all=model_all,
+            output_path=supplementary_dir / f"weekly_comparison_{group_name}.png",
+        )
+
     logger.info("Historical figures saved to: %s", output_dir)
-    
+
+
 def main() -> None:
     setup_logging()
 
@@ -1432,6 +2200,9 @@ def main() -> None:
         hydro_results_path=args.hydro_results,
         entsoe_production_path=args.entsoe_production,
         electricity_maps_path=args.electricity_maps,
+        gadm_italy_path=args.gadm_italy,
+        glohydrores_path=args.glohydrores,
+        italy_zone_path=args.italy_zone_production,
         output_dir=args.output_dir,
     )
 
