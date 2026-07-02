@@ -266,6 +266,7 @@ It performs the following tasks:
 * downloads GloFAS data through the Copernicus/ECMWF API;
 * downloads and processes EFAS data through the Copernicus/ECMWF API;
 * downloads ENTSO-E hourly hydro production data if `ENTSOE_API_TOKEN` is set;
+* downloads ENTSO-E hourly hydro production for the Italian "North" bidding zone (IT_North) if `ENTSOE_API_TOKEN` is set;
 * builds the annual ENTSO-E/Electricity Maps hydro production reference when the required inputs are available.
 
 The annual hydro production reference is written to:
@@ -329,6 +330,17 @@ CH_2019_electricity_maps.json
 ```
 
 These files are used to replace Switzerland hydro generation values for 2017–2019 in the annual hydro production reference.
+
+### GADM administrative boundaries (Italy)
+
+Expected path:
+
+data/hydro_workflow/hydro_global/GADM/gadm41_ITA_1.json
+
+GADM level-1 administrative boundaries for Italy are used by the historical
+postprocessing (`processing_historical.py`) to build the Italian "North"
+bidding-zone polygon. The file must be downloaded from the GADM portal
+(https://gadm.org) and is subject to GADM terms of use.
 
 ---
 
@@ -445,7 +457,9 @@ glofas_2015 ... glofas_2019
 efas_2015 ... efas_2019
 ```
 
-The 2050 simulations are sector-coupled runs:
+The 2050 sector-coupled scenarios are run at 4-hour temporal resolution
+(`resolution_sector: 4h` in the `config/planning_2050/*.yaml` files), which is
+the configuration used for the published results.
 
 ```text
 pypsa_2050

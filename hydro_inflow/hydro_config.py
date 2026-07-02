@@ -64,6 +64,7 @@ def get_config() -> dict:
 
     entsoe_hydro_dir = hydro_global_dir / "ENTSOE"
     entsoe_hydro_hourly_dir = entsoe_hydro_dir / "Production"
+    italy_bidding_zone_dir = entsoe_hydro_dir / "Italia_BiddingZone"
     electricity_maps_dir = entsoe_hydro_dir / "ElectricityMaps"
 
     pypsa_inflow_netcdf_dir = repo_root / "data" / "pypsa"
@@ -92,6 +93,7 @@ def get_config() -> dict:
         "entsoe_hydro_years": [2015, 2016, 2017, 2018, 2019],
         "entsoe_hydro_dir": entsoe_hydro_dir,
         "entsoe_hydro_hourly_dir": entsoe_hydro_hourly_dir,
+        "italy_bidding_zone_dir": italy_bidding_zone_dir,
         "entsoe_hydro_annual_production_path": (
             entsoe_hydro_dir / "hydro_annual_production.csv"
         ),

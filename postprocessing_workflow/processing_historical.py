@@ -1978,7 +1978,7 @@ def run_processing_historical(
     glohydrores_path = (
         glohydrores_path.resolve()
         if glohydrores_path is not None
-        else data_root / "hydro_global" / "GloHydroRes" / "GloHydroRes_vs1.csv"
+        else data_root.parent / "pypsa" / "GloHydroRes_vs1.csv"
     )
 
     italy_zone_path = (

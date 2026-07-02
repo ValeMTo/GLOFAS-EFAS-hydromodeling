@@ -58,6 +58,10 @@ COUNTRIES = {
     "XK": "10Y1001A1001A885",
 }
 
+ITALY_ZONES = {
+    "IT_North": "10Y1001A1001A73I",
+}
+
 PSR_TYPES = {
     "B10": "Pumped",
     "B11": "RoR",
@@ -341,6 +345,64 @@ def download_entsoe_hydro(
         logger.info("Saved %s with shape %s", output, year_data.shape)
 
     logger.info("ENTSO-E hydro download completed.")
+
+    return output_files
+
+def download_entsoe_italy_zones(
+    years: str = "2015:2019",
+    token: str | None = None,
+    output_dir: Path | None = None,
+    sleep_s: float = 0.12,
+    overwrite: bool = False,
+) -> list[Path]:
+    token = token or os.environ.get("ENTSOE_API_TOKEN")
+
+    if not token:
+        raise RuntimeError(
+            "ENTSOE_API_TOKEN is not set. "
+            "Set it with: export ENTSOE_API_TOKEN='<your-token>'"
+        )
+
+    cfg = get_config()
+
+    if output_dir is None:
+        output_dir = Path(cfg["italy_bidding_zone_dir"])
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    parsed_years = parse_years(years)
+    output_files: list[Path] = []
+
+    logger.info("Downloading ENTSO-E Italian bidding-zone hydro for years: %s", parsed_years)
+    logger.info("Output directory: %s", output_dir)
+
+    for year in tqdm(parsed_years, desc="Italy zones years"):
+        for zone_name, zone_code in ITALY_ZONES.items():
+            output = output_dir / f"Italy_{zone_name}_{year}.csv"
+
+            if output.exists() and not overwrite:
+                logger.info("Already exists, skipping: %s", output)
+                output_files.append(output)
+                continue
+
+            zone_data = download_country_year(
+                token=token,
+                country_code=zone_code,
+                year=year,
+                sleep_s=sleep_s,
+            )
+
+            if zone_data.empty:
+                logger.warning("%s %s returned no ENTSO-E hydro data.", zone_name, year)
+                continue
+
+            zone_data = zone_data.sort_index()
+            zone_data.to_csv(output)
+            output_files.append(output)
+
+            logger.info("Saved %s with shape %s", output, zone_data.shape)
+
+    logger.info("ENTSO-E Italian bidding-zone download completed.")
 
     return output_files
 

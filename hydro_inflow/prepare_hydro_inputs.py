@@ -10,7 +10,10 @@ from hydro_inflow.hydro_config import get_config
 from hydro_inflow.prepare_hydro_plants import prepare_hydro_plants
 from hydro_inflow.download.download_glofas_eu import download_glofas_eu
 from hydro_inflow.download.download_and_merge_efas import download_and_merge_efas
-from hydro_inflow.download.download_entsoe import download_entsoe_hydro
+from hydro_inflow.download.download_entsoe import (
+    download_entsoe_hydro,
+    download_entsoe_italy_zones,
+)
 from hydro_inflow.utils import download_file, get_data_root, get_repo_root, require_file
 from hydro_inflow.build_entsoe_hydro_annual_production import (
     build_entsoe_hydro_annual_production,
@@ -176,6 +179,9 @@ def prepare_and_check_hydro_inputs(
             )
         else:
             download_entsoe_hydro(
+                years=entsoe_years,
+            )
+            download_entsoe_italy_zones(
                 years=entsoe_years,
             )
 
