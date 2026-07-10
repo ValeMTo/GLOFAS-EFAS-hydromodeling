@@ -23,7 +23,7 @@ Running `main.py` executes the complete workflow sequence:
 Clone the repository including submodules:
 
 ```bash
-git clone --recurse-submodules <repository-url>
+git clone --recurse-submodules https://github.com/ValeMTo/GLOFAS-EFAS-hydromodeling.git
 cd GLOFAS-EFAS-hydromodeling
 ```
 
