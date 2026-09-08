@@ -93,10 +93,10 @@ def prepare_assignment_table() -> pd.DataFrame:
     assign_df_full = init()
     assign_df_full = normalize_assignment_columns(assign_df_full)
 
-    assign_df_full = mp_prop_gauges(assign_df_full)
+    assign_df_full = mp_prop_gauges(assign_df_full, n_processes=4)
     assign_df_full = normalize_assignment_columns(assign_df_full)
 
-    assign_df_full = mp_prop_regulated(assign_df_full)
+    assign_df_full = mp_prop_regulated(assign_df_full, n_processes=4)
     assign_df_full = normalize_assignment_columns(assign_df_full)
 
     return assign_df_full
