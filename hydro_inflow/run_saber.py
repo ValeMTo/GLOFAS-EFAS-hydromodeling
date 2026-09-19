@@ -524,6 +524,13 @@ def run_saber_workflow(
     """
     Run the full SABER workflow from clustering to validation.
     """
+    cal_end = os.environ.get("SABER_CALIBRATION_END")
+    calibration_end_year = int(cal_end) if cal_end else None
+    if calibration_end_year is not None:
+        logger.info(
+            "SABER calibration restricted to years <= %s (out-of-sample mode).",
+            calibration_end_year,
+        )
     logger.info("Reading SABER config: %s", config_path)
     read_config(config_path)
     init_workdir()
@@ -623,6 +630,7 @@ def run_saber_workflow(
         hindcast_zarr=hindcast_zarr,
         gauge_data_dir=gauge_data,
         target_model_map_csv=target_model_map_csv,
+        calibration_end_year=calibration_end_year,
     )
 
     stats_df = pd.DataFrame([asdict(item) for item in stats])

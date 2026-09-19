@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import logging
+import os
 import pickle
 
 import numpy as np
@@ -522,7 +523,12 @@ def run_saber_to_pypsa(cfg: dict | None = None) -> None:
     output_netcdf_template = cfg["pypsa_inflow_netcdf_template"]
     report_path = cfg["pypsa_inflow_report_path"]
 
-    years = cfg["pypsa_inflow_years"]
+    env_years = os.environ.get("SABER_INFLOW_YEARS")
+    if env_years:
+        years = [int(y) for y in env_years.replace(",", " ").split()]
+        logger.info("Overriding pypsa_inflow_years from SABER_INFLOW_YEARS: %s", years)
+    else:
+        years = cfg["pypsa_inflow_years"]
 
     rivid_map = read_rivid_map(rivid_map_path)
 

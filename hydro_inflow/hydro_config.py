@@ -88,7 +88,7 @@ def get_config() -> dict:
         "grdc_path": data_root / "Stations" / "GRDC_Europe.nc",
         "grand_path": hydro_global_dir / "GRanD_reservoirs_v1_3.shp",
         "pypsa_inflow_netcdf_dir": pypsa_inflow_netcdf_dir,
-        "pypsa_inflow_years": [2015, 2016, 2017, 2018, 2019],
+        "pypsa_inflow_years": [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023],
 
         "entsoe_hydro_years": [2015, 2016, 2017, 2018, 2019],
         "entsoe_hydro_dir": entsoe_hydro_dir,

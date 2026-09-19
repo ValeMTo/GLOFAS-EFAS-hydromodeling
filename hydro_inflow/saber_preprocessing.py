@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 import logging
 
+import os
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -415,6 +416,16 @@ def build_cluster_data(
     Q = ds["Qout"]
     model_ids = ds["model_id"].values.astype(str)
 
+    cal_end = os.environ.get("SABER_CALIBRATION_END")
+    if cal_end:
+        cal_end_year = int(cal_end)
+        time_mask = pd.to_datetime(ds["time"].values).year <= cal_end_year
+        Q = Q.isel(time=time_mask)
+        logger.info(
+            "Clustering FDC restricted to years <= %s (%s timesteps).",
+            cal_end_year, int(time_mask.sum()),
+        )
+        
     rows = []
     index = []
 
