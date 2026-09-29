@@ -100,7 +100,7 @@ def build_cutout_scenarios(
 
     scenarios: list[CutoutScenario] = []
 
-    for year in range(2015, 2020):
+    for year in range(2015, 2024):
         filename = f"europe-{year}-sarah3-era5.nc"
 
         scenarios.append(
