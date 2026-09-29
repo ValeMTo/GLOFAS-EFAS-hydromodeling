@@ -53,3 +53,10 @@ GloFAS inflows (`Europe_inflow_<year>_GloFAS_SABER_FULLCAL.nc`) used by the 2050
 scenario runs, bypassing the expanding-window calibration that the pipeline
 applies for historical validation. It overwrites shared SABER intermediates —
 read its docstring before running it.
+
+---
+
+Recovered from the `prova-claude-code` branch (`3b98b7e308d3f1f5905c708fa60e35775888d2a4`), deleted after this
+was extracted. Three unused experimental configs
+(`config/historical/pypsa_2019_{iberia,italy,hourly_country}.yaml`) were left
+behind; `git show 3b98b7e308d3f1f5905c708fa60e35775888d2a4:<path>` still retrieves them.
