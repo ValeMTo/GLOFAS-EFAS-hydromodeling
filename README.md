@@ -2,6 +2,10 @@
 
 This repository provides a reproducible hydrological preprocessing and PyPSA-Eur workflow based on GloFAS/EFAS-ERA5, GRDC observations, GRanD reservoirs and SABER bias correction.
 
+It covers hourly historical validation runs for 2015–2023 and sector-coupled
+2050 scenarios, both as single climate years and as multi-year
+climate-variability runs.
+
 The workflow is organised around a single entry point:
 
 ```bash
@@ -105,26 +109,29 @@ Expected files are:
 
 Europe_Hydro_2015.csv
 Europe_Hydro_2016.csv
-Europe_Hydro_2017.csv
-Europe_Hydro_2018.csv
-Europe_Hydro_2019.csv
+...
+Europe_Hydro_2023.csv
 
 These hourly files are used to build the annual no-pumped hydro production reference:
 
 data/hydro_workflow/hydro_global/ENTSOE/hydro_annual_production.csv
-Electricity Maps Switzerland data
+### Electricity Maps (Switzerland)
 
-For Switzerland, the annual hydro production reference uses Electricity Maps data for 2017–2019. These files are not downloaded automatically and must be placed manually in:
+Swiss hydro generation is not published on the ENTSO-E Transparency Platform, so
+it is taken from Electricity Maps instead. Downloading it requires a token:
 
-data/hydro_workflow/hydro_global/ENTSOE/ElectricityMaps/
+```bash
+export EM_TOKEN="<your-electricity-maps-token>"
+```
 
-Expected files are:
+The workflow then fetches 2017–2023 automatically into
+`data/hydro_workflow/hydro_global/ENTSOE/ElectricityMaps/`. Without the token the
+step is skipped and the files must be placed there by hand, named
+`CH_<year>_electricity_maps.json`.
 
-CH_2017_electricity_maps.json
-CH_2018_electricity_maps.json
-CH_2019_electricity_maps.json
-
-During the annual reference build, Switzerland is replaced with Electricity Maps total hydro generation for the years where these files are available. For 2015–2016, Switzerland is excluded because the corresponding Electricity Maps replacement files are not used in this workflow.
+During the annual reference build Switzerland is replaced with the Electricity
+Maps total for every year a file is available. 2015 and 2016 are not covered, so
+Switzerland is excluded from those two years.
 
 ---
 
@@ -247,6 +254,14 @@ Use a Snakemake dry-run inside the PyPSA-Eur workflow:
 python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-snakemake-dryrun
 ```
 
+Electricity Maps download control:
+
+```bash
+python main.py --electricity-maps-ch-years 2017:2023
+python main.py --electricity-maps-ch-years 2020,2021
+python main.py --skip-electricity-maps
+```
+
 ---
 
 ## 7. Hydro input preparation
@@ -325,11 +340,12 @@ Expected files:
 
 ```text
 CH_2017_electricity_maps.json
-CH_2018_electricity_maps.json
-CH_2019_electricity_maps.json
+...
+CH_2023_electricity_maps.json
 ```
 
-These files are used to replace Switzerland hydro generation values for 2017–2019 in the annual hydro production reference.
+These are downloaded automatically when `EM_TOKEN` is set (see section 3); they
+replace the Swiss hydro generation values in the annual production reference.
 
 ### GADM administrative boundaries (Italy)
 
@@ -449,23 +465,37 @@ and then launches the appropriate Snakemake target inside:
 external/pypsa-eur-hydro/
 ```
 
-Historical simulations are electricity-only runs for 2015–2019:
+Historical simulations are electricity-only runs at hourly resolution
+(`resolution_elec: 1h`) covering 2015–2023, so 27 networks in all:
 
 ```text
-pypsa_2015 ... pypsa_2019
-glofas_2015 ... glofas_2019
-efas_2015 ... efas_2019
+pypsa_2015 ... pypsa_2023
+glofas_2015 ... glofas_2023
+efas_2015 ... efas_2023
 ```
 
-The 2050 sector-coupled scenarios are run at 4-hour temporal resolution
-(`resolution_sector: 4h` in the `config/planning_2050/*.yaml` files), which is
-the configuration used for the published results.
+Each of them takes roughly 2 hours and peaks near 88 GB.
+
+The 2050 sector-coupled scenarios come in two flavours, both at 4-hour
+resolution (`resolution_sector: 4h`):
 
 ```text
-pypsa_2050
-glofas_2050
-efas_2050
+pypsa_2050            glofas_2050            efas_2050             single climate year (2019)
+pypsa_2050_multiyear  glofas_2050_multiyear  efas_2050_multiyear   two climate years (2010 + 2011)
 ```
+
+The multi-year scenarios optimise a single investment decision across two
+contrasting climate years, following PyPSA-Eur PR #1613: `snapshots.start/end`
+and `atlite.default_cutout` are lists rather than single values. They need
+32 solver threads and about 400 GB, and take some 11 hours each.
+
+Because their results span two years, every extensive quantity must be divided
+by `nyears` before being compared with a single-year run. The postprocessing
+does this; a manual comparison must not skip it.
+
+The multi-year scenarios draw their inflows from the FULL-period SABER
+calibration (`inflow_variant: FULLCAL`) rather than the expanding-window one,
+which is the appropriate choice for scenario work as opposed to validation.
 
 Expected historical network outputs include:
 
@@ -481,6 +511,9 @@ Expected 2050 network outputs include:
 external/pypsa-eur-hydro/results/PyPSA_Europe_2050/networks/base_s_100___2050.nc
 external/pypsa-eur-hydro/results/GloFAS_Europe_2050/networks/base_s_100___2050.nc
 external/pypsa-eur-hydro/results/EFAS_Europe_2050/networks/base_s_100___2050.nc
+external/pypsa-eur-hydro/results/PyPSA_Europe_2050_MultiYear/networks/base_s_100___2050.nc
+external/pypsa-eur-hydro/results/GloFAS_Europe_2050_MultiYear/networks/base_s_100___2050.nc
+external/pypsa-eur-hydro/results/EFAS_Europe_2050_MultiYear/networks/base_s_100___2050.nc
 ```
 
 Hydro inflow selection is inferred from the scenario name:
@@ -488,6 +521,13 @@ Hydro inflow selection is inferred from the scenario name:
 * GloFAS scenarios use `data/pypsa/Europe_inflow_<year>_GloFAS_SABER.nc`;
 * EFAS scenarios use `data/pypsa/Europe_inflow_<year>_EFAS_SABER.nc`;
 * baseline PyPSA scenarios use the default PyPSA hydro treatment.
+
+With `inflow_variant: FULLCAL` the `_FULLCAL` files are used instead.
+
+Reservoirs are kept as individual units. `GloFAS_ERA5.reservoir_subclustering`
+groups them within each bus and must stay `false`: with it on, the GloFAS and
+EFAS runs carry 356 aggregated reservoirs against the baseline's 1078, and the
+three scenarios are no longer comparable.
 
 ---
 
@@ -522,10 +562,9 @@ postprocessing_workflow/processing_hydro_representation.py
 The expected local output folders include:
 
 ```text
-hydro_results/PyPSA_2015/
-hydro_results/GloFAS-SABER_2015/
-hydro_results/EFAS-SABER_2015/
-...
+hydro_results/PyPSA_2015/ ... hydro_results/PyPSA_2023/
+hydro_results/GloFAS-SABER_2015/ ... hydro_results/GloFAS-SABER_2023/
+hydro_results/EFAS-SABER_2015/ ... hydro_results/EFAS-SABER_2023/
 hydro_results/PyPSA_2050/
 hydro_results/GloFAS-SABER_2050/
 hydro_results/EFAS-SABER_2050/
@@ -539,6 +578,30 @@ A postprocessing-only dry-run can be launched with:
 ```bash
 python main.py --from-step run-postprocessing --to-step run-postprocessing --dry-run
 ```
+
+The two processing modules can also be called directly, which is convenient
+when only the figures need regenerating. `processing_historical.py` takes the
+range of years to process:
+
+```bash
+python -m postprocessing_workflow.processing_historical --hydro-results hydro_results --years 2015:2023
+python -m postprocessing_workflow.processing_2050 --hydro-results hydro_results
+```
+
+Both accept `--output-dir`, so an alternative set of figures can be written
+somewhere else without touching the published ones.
+
+Besides the main figures, the historical module writes to
+`hydro_results/images/historical/supplementary/`:
+
+```text
+table_s1_kgess.txt              KGESS per country, with the installed RoR/reservoir split
+table_s2_kge_components.txt     the r, beta and gamma decomposition
+kge_components_country_map.png  the same decomposition as 3x3 maps
+weekly_comparison_group*.png    weekly series, four countries per panel
+```
+
+The two tables are ready-to-include LaTeX.
 
 ---
 
@@ -566,6 +629,15 @@ Postprocessing wrapper and analysis scripts:
 
 ```text
 postprocessing_workflow/
+```
+
+One-off analyses, kept for reference and deliberately outside the pipeline
+(run-of-river and reservoir audits, SABER leave-one-out, the hydrological year
+index, the standalone FULL-period SABER calibration). Each script writes into
+its own `*_out/` directory beside it; see `analysis/README.md`:
+
+```text
+analysis/
 ```
 
 Scenario and cutout configuration files:
@@ -631,7 +703,11 @@ Run only one PyPSA scenario:
 
 ```bash
 python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-only glofas_2019
+python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-only glofas_2050_multiyear
 ```
+
+Note that the wrapper skips a scenario whose target network already exists. To
+force a re-run, move the existing `.nc` out of the way first.
 
 Run a Snakemake dry-run for PyPSA scenarios:
 
