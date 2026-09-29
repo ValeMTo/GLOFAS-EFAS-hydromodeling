@@ -1,0 +1,50 @@
+RoR CONVERSION: DIAGNOSIS AND VERSION COMPARISON
+==============================================================
+
+years              : [2015]
+inflow dt          : 1 h
+plants matched     : 2826
+RoR plants         : 1553  (45.24 GW)
+  of which canal   : 100
+  type missing     : 238
+  head imputed     : 18.6 % of MW
+Qmax/Qbar p10/50/90: 0.07 / 1.17 / 15.24
+
+ENERGY DENOMINATORS [TWh]
+  simulated RoR (V1)         : 142.4
+  simulated reservoir inflow : 1647.2
+  observed RoR (ENTSO-E)     : 170.0
+  observed reservoir         : 184.7
+  observed total hydro       : 398.0
+
+INVENTORY DIAGNOSIS
+  implied CF > 1 (impossible): FI, RO, CZ
+  flagged on cap/peak ratio  : IT, AT, NO, CH, SE, FI, SK, RS, ES, RO, HR, AL, ME, LV, PL, IE, BA, BE, CZ, GR, MK, BG
+  usable obs coverage        : AT, BE, CZ, DE, ES, FI, FR, GB, HU, IE, IT, LU, NO, PL, PT, RO, SI, SK
+  dropped for low coverage   : BG, CH, EE, GR, LT, LV, ME, NL, SE
+
+EUROPE, all versions:
+         n_weeks  E_obs_TWh  E_sim_TWh  dE_TWh      r   beta  gamma  kgess
+version                                                                   
+V0            38    124.946     68.819 -56.127  0.931  0.551  0.902    NaN
+V1p           38    124.946     77.209 -47.737  0.933  0.618  0.745    NaN
+V1            38    124.946     75.346 -49.600  0.933  0.603  0.765    NaN
+V2            38    124.946     74.871 -50.075  0.933  0.599  0.741    NaN
+
+HEAD SENSITIVITY V2 - V1
+ dz_m   b  dE_TWh  pct_of_sim_RoR  pct_of_obs_RoR  pct_of_obs_hydro
+  0.5 0.3  -0.083          -0.058          -0.049            -0.021
+  0.5 0.5  -0.277          -0.194          -0.163            -0.070
+  1.5 0.3  -0.254          -0.178          -0.149            -0.064
+  1.5 0.5  -0.829          -0.582          -0.488            -0.208
+  3.0 0.3  -0.538          -0.378          -0.316            -0.135
+  3.0 0.5  -1.626          -1.142          -0.957            -0.409
+
+by head class (pct of simulated RoR energy in that class)
+ dz_m   b  pct_H<5  pct_5-15  pct_15-50  pct_>50
+  0.5 0.3    1.390     0.026     -0.109   -0.092
+  0.5 0.5    1.637    -0.119     -0.313   -0.197
+  1.5 0.3    3.050     0.078     -0.325   -0.267
+  1.5 0.5    4.109    -0.350     -0.936   -0.582
+  3.0 0.3    2.653     0.178     -0.647   -0.530
+  3.0 0.5    4.020    -0.450     -1.870   -1.159

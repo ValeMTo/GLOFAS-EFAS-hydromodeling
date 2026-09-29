@@ -1,0 +1,27 @@
+ROR MATCH PROTOTYPE: two-tier drain-table rule vs today's assignment
+========================================================================
+
+plant identity: Eur_custom_ppls_GloHydroRes_filled.csv row index (the real pipeline identity, not GloHydroRes_vs1.csv 'ID')
+'old' source   : final_hydro_plant_glofas_points.parquet river_mean (raw GloFAS mean at today's assigned cell -- same physical quantity as 'new', not the SABER-corrected series)
+rule: 10km band[0.2,5] -> 25km same band -> 25km relaxed>=0.1 -> flagged fallback
+
+RoR plants: 1552 (45.22 GW)
+
+TIER SUMMARY (capacity by how the match was resolved)
+tier
+ok_in_band_10km                     40.220766
+ok_in_band_25km                      3.378232
+ok_relaxed_band                      1.139518
+FAILED_no_drain_node_within_25km     0.291690
+FAILED_no_plausible_cell             0.186300
+
+TRANSITION MATRIX old-bucket x new-bucket [GW]
+new_bucket    failed    in_band  out_of_band
+old_bucket                                  
+in_band      0.20029  40.159069     0.231200
+out_of_band  0.27770   3.439929     0.908318
+
+Capacity moved from out-of-band to in-band : 3.44 GW (median move: 12.4 km)
+Capacity still out-of-band or failed        : 1.19 GW
+Capacity that WORSENED (was in-band, now not): 0.43 GW
+Capacity FAILED (no plausible cell at all)  : 0.48 GW

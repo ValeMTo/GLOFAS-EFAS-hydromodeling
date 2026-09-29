@@ -1,0 +1,5 @@
+river_type,dead,severely_under,plausible,suspect,impossible,total_GW,pct_dead,pct_severely_under,pct_plausible,pct_suspect,pct_impossible,TWh_dead,TWh_severely_under,TWh_plausible,TWh_suspect,TWh_impossible
+canal_scheme,1.106,0.919,0.581,0.213,0.271,3.091,35.8,29.7,18.8,6.9,8.8,0.023,0.55,1.593,1.38,2.273
+major_river,8.725,1.396,5.24,2.492,0.749,18.602,46.9,7.5,28.2,13.4,4.0,0.102,0.838,20.381,15.402,6.32
+other_river,3.61,2.671,5.907,1.531,3.358,17.077,21.1,15.6,34.6,9.0,19.7,0.079,1.544,21.014,10.158,28.281
+river_unknown,1.437,1.093,2.159,0.787,0.998,6.473,22.2,16.9,33.3,12.2,15.4,0.046,0.778,7.506,5.206,8.445

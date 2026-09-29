@@ -1,0 +1,3 @@
+head_source,already_ok,recoverable_near,recoverable_far,not_recoverable,total_GW,pct_already_ok,pct_recoverable_near,pct_recoverable_far,pct_not_recoverable
+imputed,3.853,3.022,0.509,1.037,8.421,45.8,35.9,6.0,12.3
+reported,15.51,18.532,1.299,1.48,36.822,42.1,50.3,3.5,4.0

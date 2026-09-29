@@ -1,0 +1,4 @@
+match_type,dead,severely_under,plausible,suspect,impossible,total_GW,pct_dead,pct_severely_under,pct_plausible,pct_suspect,pct_impossible,TWh_dead,TWh_severely_under,TWh_plausible,TWh_suspect,TWh_impossible
+drain_k_nearest,0.693,2.377,24.042,10.841,4.164,42.116,1.6,5.6,57.1,25.7,9.9,0.014,1.587,93.893,67.907,34.912
+drain_radius,0.13,0.143,0.373,0.314,0.281,1.24,10.5,11.5,30.0,25.3,22.6,0.002,0.161,1.205,2.02,2.378
+fallback_nn_glofas,0.57,0.228,0.832,0.138,0.077,1.845,30.9,12.3,45.1,7.5,4.2,0.011,0.2,2.506,0.932,0.622

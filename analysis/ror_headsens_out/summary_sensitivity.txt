@@ -1,0 +1,81 @@
+HEAD-VARIATION SENSITIVITY OF THE RoR CONVERSION
+==============================================================
+
+years            : [2015, 2016, 2017, 2018]  (35040 steps, dt = 1 h)
+RoR plants       : 1553  (45.24 GW)
+well-assigned    : 668 plants, 20.11 GW (Qmax/Qbar in (0.5, 4.0))
+geom-matched     : 1553 plants, 45.24 GW
+head < 15 m    : 11.85 GW
+
+BASELINE ANNUAL ENERGY [TWh/yr]
+  V0 published :   125.63
+  observed RoR :   176.84
+  observed hydro:  428.09
+
+V_head vs V0
+  whole fleet (diluted by 0 unmatched plants):
+    +0.04 TWh/yr = +0.03 % of V0 = +0.02 % of observed RoR = +0.01 % of observed total hydro
+  geometry-matched plants only (the number to quote for the reviewer):
+    +0.04 TWh/yr = +0.03 % of their own V0 energy
+  well-assigned plants only:
+    +0.79 TWh/yr = +0.99 % of their own V0 energy
+  low-head plants (< 15 m): +1.22 % of their V0 energy
+  other plants (>= 15 m):  -0.30 % of their V0 energy
+
+V_head_adverse vs V0 (part-load gain removed, flood loss only,
+ same real geometry -- no extra assumption beyond min(1, h))
+  whole fleet: -1.41 TWh/yr = -1.12 % of V0 = -0.80 % of observed RoR = -0.33 % of observed total hydro
+  geometry-matched plants only: -1.41 TWh/yr = -1.12 % of their own V0 energy
+  well-assigned plants only: -0.56 TWh/yr = -0.70 % of their own V0 energy
+  low-head plants (< 15 m): -2.34 % of their V0 energy
+  other plants (>= 15 m):  -0.79 % of their V0 energy
+
+V_head_gain vs V0 (mirror of V_head_adverse: part-load gain kept,
+ flood loss removed -- h(q) frozen at 1 for q>=1)
+  whole fleet: +1.45 TWh/yr = +1.15 % of V0 = +0.82 % of observed RoR = +0.34 % of observed total hydro
+  geometry-matched plants only: +1.45 TWh/yr = +1.15 % of their own V0 energy
+  well-assigned plants only: +1.35 TWh/yr = +1.70 % of their own V0 energy
+  low-head plants (< 15 m): +3.56 % of their V0 energy
+  other plants (>= 15 m):  +0.49 % of their V0 energy
+
+V_head_cellcell vs V0 (two-sided: monte AND valle both vary,
+ using the upstream drainage node and the matched cell directly,
+ ~5 km apart -- drops the fixed-headwater assumption)
+  upstream resolved: 1147/1553 plants, 34.75 GW
+  whole fleet: -0.39 TWh/yr = -0.31 % of V0 = -0.22 % of observed RoR = -0.09 % of observed total hydro
+  geometry-matched plants only: -0.39 TWh/yr = -0.31 % of their own V0 energy
+  well-assigned plants only: -0.12 TWh/yr = -0.15 % of their own V0 energy
+  low-head plants (< 15 m): -0.77 % of their V0 energy
+  other plants (>= 15 m):  -0.19 % of their V0 energy
+
+V_head_local100 vs V0 (two-sided, but monte/valle are the
+ plant's TRUE position projected onto the monte-valle segment and a
+ point 100 m further towards valle -- geometry blended between
+ the two endpoint cells, no new raster read; expect near-total
+ cancellation at short offsets, since monte and valle sit on the
+ same short reach)
+  100 m offset exceeds the segment for 531 plants (clipped to valle)
+  whole fleet: -0.02 TWh/yr = -0.01 % of V0 = -0.01 % of observed RoR = -0.00 % of observed total hydro
+  geometry-matched plants only: -0.02 TWh/yr = -0.01 % of their own V0 energy
+  well-assigned plants only: -0.01 TWh/yr = -0.01 % of their own V0 energy
+  low-head plants (< 15 m): -0.02 % of their V0 energy
+  other plants (>= 15 m):  -0.01 % of their V0 energy
+
+V_head_cellcell_downstream vs V0 (mirror of V_head_cellcell: the
+ matched cell now plays monte, and its resolved downstream
+ neighbour plays valle -- downstream_model_id is single-valued, so
+ coverage should be much higher than the upstream lookup)
+  downstream resolved: 1320/1553 plants, 39.08 GW
+  whole fleet: -0.50 TWh/yr = -0.40 % of V0 = -0.28 % of observed RoR = -0.12 % of observed total hydro
+  geometry-matched plants only: -0.50 TWh/yr = -0.40 % of their own V0 energy
+  well-assigned plants only: -0.21 TWh/yr = -0.26 % of their own V0 energy
+  low-head plants (< 15 m): -0.84 % of their V0 energy
+  other plants (>= 15 m):  -0.28 % of their V0 energy
+
+GAIN-ONLY MIRRORS OF THE THREE TWO-SIDED VARIANTS
+--------------------------------------------------
+(h(q) frozen at 1 for q>=1: no flood derating from either side,
+ only the part-load variation between qmin and design flow)
+  [V_head_cellcell_gain] whole fleet: +0.08 TWh/yr = +0.06 % of V0 | low-head: -0.18 % | high-head: +0.13 %
+  [V_head_local100_gain] whole fleet: +0.04 TWh/yr = +0.03 % of V0 | low-head: -0.02 % | high-head: +0.05 %
+  [V_head_cellcell_downstream_gain] whole fleet: -0.06 TWh/yr = -0.05 % of V0 | low-head: -0.12 % | high-head: -0.03 %

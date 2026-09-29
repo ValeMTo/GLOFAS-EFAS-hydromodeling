@@ -1,0 +1,5 @@
+river_type,already_ok,recoverable_near,recoverable_far,not_recoverable,total_GW,pct_already_ok,pct_recoverable_near,pct_recoverable_far,pct_not_recoverable
+canal_scheme,0.9,1.608,0.385,0.197,3.091,29.1,52.0,12.5,6.4
+major_river,7.301,10.699,0.199,0.878,19.077,38.3,56.1,1.0,4.6
+other_river,7.866,6.908,0.651,1.177,16.602,47.4,41.6,3.9,7.1
+river_unknown,3.296,2.339,0.572,0.267,6.473,50.9,36.1,8.8,4.1

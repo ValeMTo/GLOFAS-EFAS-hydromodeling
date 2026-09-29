@@ -1,0 +1,6 @@
+tier,Capacity
+ok_in_band_10km,40.220766130611004
+ok_in_band_25km,3.378232
+ok_relaxed_band,1.139518
+FAILED_no_drain_node_within_25km,0.29169
+FAILED_no_plausible_cell,0.18630000000000002

@@ -1,0 +1,59 @@
+RECOVERABILITY TEST: was a correctly scaled cell available?
+================================================================
+
+plant identity     : Eur_custom_ppls_GloHydroRes_filled.csv row index (the real pipeline identity)
+assigned cell from : final_hydro_plant_glofas_points.parquet (raw GloFAS mean, homogeneous with the search field)
+search radius      : 25 km (near threshold 10 km)
+acceptable band    : Q_cell/Qmax within a factor of 3
+GloFAS mean years  : [2015, 2016, 2017]
+efficiency         : 0.85
+RoR plants         : 1552  (45.22 GW)
+
+AVAILABILITY (is a correctly scaled cell reachable at all?)
+  good_cell_near       38.57 GW  ( 85.3 %)
+  no_good_cell          3.36 GW  (  7.4 %)
+  good_cell_far         3.28 GW  (  7.3 %)
+
+VERDICT vs THE CELL ACTUALLY ASSIGNED
+  already_ok           35.10 GW  ( 77.6 %)
+  recoverable_near      3.98 GW  (  8.8 %)
+  recoverable_far       3.08 GW  (  6.8 %)
+  not_recoverable       3.04 GW  (  6.7 %)
+  unknown_assignment    0.01 GW  (  0.0 %)
+
+Of the 10.11 GW whose assigned cell is out of band,
+  7.06 GW (69.8 %) had a correctly scaled cell within reach.
+  median distance to that cell: 5.6 km
+  share of that capacity with the cell inside 10 km: 56.4 %
+BY COUNTRY
+         already_ok  recoverable_near  recoverable_far  not_recoverable  unknown_assignment  total_GW  pct_already_ok  pct_recoverable_near  pct_recoverable_far  pct_not_recoverable  pct_unknown_assignment
+country                                                                                                                                                                                                      
+FR            5.878             0.519            0.818            0.504               0.000     7.719            76.2                   6.7                 10.6                  6.5                     0.0
+IT            3.704             0.754            0.569            0.281               0.000     5.308            69.8                  14.2                 10.7                  5.3                     0.0
+AT            4.279             0.097            0.189            0.181               0.000     4.746            90.2                   2.0                  4.0                  3.8                     0.0
+NO            3.671             0.626            0.192            0.038               0.000     4.527            81.1                  13.8                  4.2                  0.8                     0.0
+CH            2.740             0.863            0.189            0.000               0.000     3.792            72.3                  22.8                  5.0                  0.0                     0.0
+SE            3.012             0.207            0.000            0.124               0.000     3.343            90.1                   6.2                  0.0                  3.7                     0.0
+PT            2.069             0.057            0.166            0.008               0.014     2.314            89.4                   2.5                  7.2                  0.3                     0.6
+DE            1.789             0.048            0.047            0.116               0.000     2.000            89.5                   2.4                  2.4                  5.8                     0.0
+FI            1.541             0.079            0.085            0.030               0.000     1.736            88.8                   4.6                  4.9                  1.8                     0.0
+RS            1.400             0.000            0.000            0.000               0.000     1.400           100.0                   0.0                  0.0                  0.0                     0.0
+SK            1.089             0.038            0.024            0.214               0.000     1.365            79.7                   2.8                  1.8                 15.7                     0.0
+ES            0.853             0.055            0.247            0.095               0.000     1.250            68.3                   4.4                 19.7                  7.6                     0.0
+RO            0.516             0.110            0.172            0.212               0.000     1.010            51.1                  10.9                 17.0                 21.0                     0.0
+GB            0.472             0.306            0.111            0.103               0.000     0.992            47.6                  30.8                 11.2                 10.4                     0.0
+SI            0.769             0.033            0.140            0.002               0.000     0.944            81.5                   3.4                 14.8                  0.2                     0.0
+LV            0.000             0.000            0.000            0.642               0.000     0.642             0.0                   0.0                  0.0                100.0                     0.0
+HR            0.290             0.056            0.042            0.041               0.000     0.428            67.7                  13.0                  9.9                  9.5                     0.0
+AL            0.271             0.114            0.036            0.000               0.000     0.421            64.3                  27.1                  8.6                  0.0                     0.0
+ME            0.307             0.005            0.000            0.000               0.000     0.312            98.3                   1.7                  0.0                  0.0                     0.0
+PL            0.196             0.004            0.004            0.015               0.000     0.219            89.3                   1.8                  1.8                  7.0                     0.0
+IE            0.086             0.000            0.000            0.130               0.000     0.216            39.8                   0.0                  0.0                 60.2                     0.0
+BA            0.000             0.000            0.000            0.190               0.000     0.190             0.0                   0.0                  0.0                100.0                     0.0
+BE            0.082             0.000            0.000            0.000               0.000     0.082           100.0                   0.0                  0.0                  0.0                     0.0
+CZ            0.062             0.000            0.013            0.000               0.000     0.076            82.6                   0.0                 17.4                  0.0                     0.0
+GR            0.010             0.000            0.000            0.060               0.000     0.070            14.7                   0.0                  0.0                 85.3                     0.0
+MK            0.000             0.010            0.013            0.019               0.000     0.042             0.0                  23.1                 30.8                 46.2                     0.0
+XK            0.000             0.000            0.000            0.030               0.000     0.030             0.0                   0.0                  0.0                100.0                     0.0
+BG            0.000             0.000            0.022            0.000               0.000     0.022             0.0                   0.0                100.0                  0.0                     0.0
+HU            0.018             0.000            0.000            0.000               0.000     0.018           100.0                   0.0                  0.0                  0.0                     0.0
