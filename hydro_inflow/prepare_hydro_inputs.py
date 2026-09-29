@@ -13,7 +13,9 @@ from hydro_inflow.download.download_and_merge_efas import download_and_merge_efa
 from hydro_inflow.download.download_entsoe import (
     download_entsoe_hydro,
     download_entsoe_italy_zones,
+    parse_years,
 )
+from hydro_inflow.download.download_electricity_maps import download_electricity_maps
 from hydro_inflow.utils import download_file, get_data_root, get_repo_root, require_file
 from hydro_inflow.build_entsoe_hydro_annual_production import (
     build_entsoe_hydro_annual_production,
@@ -128,10 +130,12 @@ def prepare_and_check_hydro_inputs(
     glofas_years: str = "1980:2025",
     efas_years: str = "1992:2025",
     entsoe_years: str = "2015:2019",
+    electricity_maps_ch_years: str = "2017:2023",
     skip_static: bool = False,
     skip_glofas: bool = False,
     skip_efas: bool = False,
     skip_entsoe: bool = False,
+    skip_electricity_maps: bool = False,
     overwrite_static: bool = False,
     overwrite_glohydrores: bool = False,
 ) -> None:
@@ -183,6 +187,18 @@ def prepare_and_check_hydro_inputs(
             )
             download_entsoe_italy_zones(
                 years=entsoe_years,
+            )
+
+    if not skip_electricity_maps:
+        if "EM_TOKEN" not in os.environ:
+            logger.warning(
+                "Skipping Electricity Maps download because EM_TOKEN is not set."
+            )
+        else:
+            download_electricity_maps(
+                years=parse_years(electricity_maps_ch_years),
+                zone="CH",
+                output_dir=str(cfg["electricity_maps_dir"]),
             )
 
     try:

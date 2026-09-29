@@ -90,7 +90,9 @@ def get_config() -> dict:
         "pypsa_inflow_netcdf_dir": pypsa_inflow_netcdf_dir,
         "pypsa_inflow_years": [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023],
 
-        "entsoe_hydro_years": [2015, 2016, 2017, 2018, 2019],
+        "entsoe_hydro_years": [
+            2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023,
+        ],
         "entsoe_hydro_dir": entsoe_hydro_dir,
         "entsoe_hydro_hourly_dir": entsoe_hydro_hourly_dir,
         "italy_bidding_zone_dir": italy_bidding_zone_dir,
@@ -102,6 +104,10 @@ def get_config() -> dict:
             2017: electricity_maps_dir / "CH_2017_electricity_maps.json",
             2018: electricity_maps_dir / "CH_2018_electricity_maps.json",
             2019: electricity_maps_dir / "CH_2019_electricity_maps.json",
+            2020: electricity_maps_dir / "CH_2020_electricity_maps.json",
+            2021: electricity_maps_dir / "CH_2021_electricity_maps.json",
+            2022: electricity_maps_dir / "CH_2022_electricity_maps.json",
+            2023: electricity_maps_dir / "CH_2023_electricity_maps.json",
         },
         "entsoe_ch_years_without_electricity_maps": [2015, 2016],
         "entsoe_min_component_coverage": 0.50,

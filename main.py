@@ -115,6 +115,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--electricity-maps-ch-years",
+        default="2017:2023",
+        help="Electricity Maps (Switzerland) years to download. Example: '2017:2023', '2019' or '2018,2019'.",
+    )
+
+    parser.add_argument(
         "--skip-static",
         action="store_true",
         help="Debug option: skip static hydro inputs such as HydroBASINS and GloFAS uparea.",
@@ -136,6 +142,12 @@ def parse_args() -> argparse.Namespace:
         "--skip-entsoe",
         action="store_true",
         help="Debug option: skip ENTSO-E hydro production download.",
+    )
+
+    parser.add_argument(
+        "--skip-electricity-maps",
+        action="store_true",
+        help="Debug option: skip Electricity Maps (Switzerland) download.",
     )
 
     parser.add_argument(
@@ -296,10 +308,12 @@ def run_complete_workflow(args: argparse.Namespace) -> None:
             if args.dry_run:
                 logger.info(
                     "[dry-run] Would prepare hydro inputs "
-                    "(GloFAS years=%s, EFAS years=%s, ENTSO-E years=%s).",
+                    "(GloFAS years=%s, EFAS years=%s, ENTSO-E years=%s, "
+                    "Electricity Maps CH years=%s).",
                     args.glofas_years,
                     args.efas_years,
                     args.entsoe_years,
+                    args.electricity_maps_ch_years,
                 )
                 continue
 
@@ -307,10 +321,12 @@ def run_complete_workflow(args: argparse.Namespace) -> None:
                 glofas_years=args.glofas_years,
                 efas_years=args.efas_years,
                 entsoe_years=args.entsoe_years,
+                electricity_maps_ch_years=args.electricity_maps_ch_years,
                 skip_static=args.skip_static,
                 skip_glofas=args.skip_glofas,
                 skip_efas=args.skip_efas,
                 skip_entsoe=args.skip_entsoe,
+                skip_electricity_maps=args.skip_electricity_maps,
                 overwrite_static=args.overwrite_static,
                 overwrite_glohydrores=args.overwrite_glohydrores,
             )
