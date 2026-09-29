@@ -1086,7 +1086,7 @@ clustering:
       ramp_limit_down: max
     buses: {}
   temporal:
-    resolution_elec: 3h
+    resolution_elec: 1h
     resolution_sector: false
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#adjustments
