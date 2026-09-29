@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # SETTINGS
 # ============================================================
 
-HISTORICAL_YEARS = [2015, 2016, 2017, 2018, 2019]
+HISTORICAL_YEARS = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]
 
 HISTORICAL_NETWORK_FILE = "base_s_100_elec_.nc"
 FUTURE_NETWORK_FILE = "base_s_100___2050.nc"
@@ -50,18 +50,21 @@ SCENARIOS_2050 = {
     "pypsa": {
         "target_dir": "PyPSA_2050",
         "source_candidates": [
+            "PyPSA_Europe_2050_MultiYear",
             "PyPSA_Europe_2050",
         ],
     },
     "glofas_saber": {
         "target_dir": "GloFAS-SABER_2050",
         "source_candidates": [
+            "GloFAS_Europe_2050_MultiYear",
             "GloFAS_Europe_2050",
         ],
     },
     "efas_saber": {
         "target_dir": "EFAS-SABER_2050",
         "source_candidates": [
+            "EFAS_Europe_2050_MultiYear",
             "EFAS_Europe_2050",
         ],
     },

@@ -153,9 +153,25 @@ def load_2050_networks(hydro_results_path):
     }
 
 
+EXTENSIVE_STATISTICS = [
+    "Supply",
+    "Withdrawal",
+    "Energy Balance",
+    "Transmission",
+    "Curtailment",
+    "Capital Expenditure",
+    "Operational Expenditure",
+    "Revenue",
+]
+
+
 def get_numeric_statistics(network):
     stats = network.statistics().copy()
     stats_num = stats.select_dtypes(include=[np.number]).copy()
+
+    nyears = network.snapshot_weightings.objective.sum() / 8760
+    extensive = [col for col in EXTENSIVE_STATISTICS if col in stats_num.columns]
+    stats_num[extensive] = stats_num[extensive] / nyears
 
     return stats_num
 
@@ -374,6 +390,44 @@ def build_baseline_absolute_series(
     return baseline_series
 
 
+def annotate_percentage_labels(ax, plot_df, baseline_series, bar_width):
+    n_scenarios = len(plot_df.columns)
+    values = plot_df.to_numpy(dtype=float)
+
+    if values.size == 0:
+        return
+
+    y_offset = 0.02 * np.nanmax(np.abs(values))
+
+    for i, row_name in enumerate(plot_df.index):
+        base = baseline_series.get(row_name, np.nan)
+
+        for j in range(n_scenarios):
+            abs_val = values[i, j]
+
+            if pd.isna(abs_val) or pd.isna(base) or base == 0:
+                continue
+
+            pct_val = abs_val / base * 100
+            x_pos = i + (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios)
+            sign = "+" if pct_val >= 0 else ""
+
+            ax.text(
+                x_pos,
+                abs_val + (y_offset if abs_val >= 0 else -y_offset),
+                f"{sign}{pct_val:.1f}%",
+                ha="center",
+                va="bottom" if abs_val >= 0 else "top",
+                fontsize=7.5,
+                color="black",
+                rotation=90,
+            )
+
+    bottom, top = ax.get_ylim()
+    pad = 0.18 * (top - bottom)
+    ax.set_ylim(bottom - pad, top + pad)
+
+
 def plot_grouped_bar_difference(
     plot_df,
     baseline_series,
@@ -395,7 +449,7 @@ def plot_grouped_bar_difference(
     fixed_figsize = (10, 7)
 
     fig = plt.figure(figsize=fixed_figsize, facecolor="white")
-    ax = fig.add_axes([0.09, 0.24, 0.90, 0.70])
+    ax = fig.add_axes([0.09, 0.33, 0.90, 0.61])
 
     plot_df.plot(
         kind="bar",
@@ -408,6 +462,13 @@ def plot_grouped_bar_difference(
     )
 
     ax.axhline(0, linewidth=1.0, color="black", zorder=4)
+
+    annotate_percentage_labels(
+        ax=ax,
+        plot_df=plot_df,
+        baseline_series=baseline_series,
+        bar_width=0.8,
+    )
 
     ax.grid(
         axis="y",
@@ -458,8 +519,8 @@ def plot_grouped_bar_difference(
     y_range = max(abs(y_min), abs(y_max), 1e-9)
 
     ax.set_ylim(
-        y_min - 0.12 * y_range,
-        y_max + 0.12 * y_range,
+        y_min - 0.25 * y_range,
+        y_max + 0.25 * y_range,
     )
 
     save_figure(fig, output_path)
@@ -641,10 +702,10 @@ def make_optimal_capacity_pct_figure(networks, output_path):
     if pct_df.empty:
         return
 
-    fixed_figsize = (10, 6.5)
+    fixed_figsize = (10, 7)
 
     fig = plt.figure(figsize=fixed_figsize, facecolor="white")
-    ax = fig.add_axes([0.09, 0.35, 0.90, 0.62])
+    ax = fig.add_axes([0.09, 0.33, 0.90, 0.61])
 
     colors = [SCENARIO_COLORS.get(col, None) for col in pct_df.columns]
 
@@ -708,7 +769,7 @@ def make_optimal_capacity_pct_figure(networks, output_path):
 
     ax.legend(
         title="Scenario",
-        loc="lower right",
+        loc="lower left",
         frameon=True,
         framealpha=0.95,
         edgecolor="black",
@@ -899,7 +960,7 @@ def make_cost_difference_figure(networks, output_path):
     fixed_figsize = (10, 7)
 
     fig = plt.figure(figsize=fixed_figsize, facecolor="white")
-    ax = fig.add_axes([0.09, 0.24, 0.90, 0.70])
+    ax = fig.add_axes([0.09, 0.33, 0.90, 0.61])
 
     colors = [
         SCENARIO_COLORS.get(col, None)
@@ -921,6 +982,13 @@ def make_cost_difference_figure(networks, output_path):
         color="black",
         linewidth=1.0,
         zorder=4,
+    )
+
+    annotate_percentage_labels(
+        ax=ax,
+        plot_df=difference_plot_df,
+        baseline_series=baseline_values,
+        bar_width=0.75,
     )
 
     xtick_labels = [
@@ -967,8 +1035,9 @@ def make_cost_difference_figure(networks, output_path):
     y_min = difference_plot_df.min().min()
     y_max = difference_plot_df.max().max()
 
-    positive_margin = 0.2 * abs(y_max) if y_max > 0 else 0.5
-    negative_margin = 0.3 * abs(y_min) if y_min < 0 else 0.5
+    y_range = max(abs(y_min), abs(y_max), 1e-9)
+    positive_margin = 0.22 * y_range if y_max > 0 else 0.5
+    negative_margin = 0.30 * y_range if y_min < 0 else 0.5
 
     y_lower = (
         y_min - negative_margin
@@ -1045,7 +1114,7 @@ def make_storage_difference_figure(networks, output_path):
     drop_zero_pypsa_baseline = True
     sort_by_max_abs_difference = True
 
-    min_abs_difference = 0.01
+    min_abs_difference = 0.05
     min_baseline_value = 0.01
 
     absolute_df = pd.DataFrame()
@@ -1107,10 +1176,10 @@ def make_storage_difference_figure(networks, output_path):
     if pct_difference_df.empty:
         return
 
-    fixed_figsize = (10, 6.5)
+    fixed_figsize = (10, 7)
 
     fig = plt.figure(figsize=fixed_figsize, facecolor="white")
-    ax = fig.add_axes([0.09, 0.35, 0.90, 0.62])
+    ax = fig.add_axes([0.09, 0.33, 0.90, 0.61])
 
     colors = [SCENARIO_COLORS.get(col, None) for col in pct_difference_df.columns]
 
@@ -1681,10 +1750,10 @@ def make_reservoir_spillage_figure(networks, hydro_results_path, output_path):
     ]
 
     category_titles = {
-        "Small": "Small (Volume < 1 Mm³)",
-        "Medium": "Medium (1 Mm³ ≤ Volume < 3 Mm³)",
-        "Large": "Large (3 Mm³ ≤ Volume ≤ 100 Mm³)",
-        "Mega/Major": "Mega/Major (Volume > 100 Mm³)",
+        "Small": "Small (Volume < 1 hm³)",
+        "Medium": "Medium (1 hm³ ≤ Volume < 3 hm³)",
+        "Large": "Large (3 hm³ ≤ Volume ≤ 100 hm³)",
+        "Mega/Major": "Mega/Major (Volume > 100 hm³)",
     }
 
     resample_rule = None

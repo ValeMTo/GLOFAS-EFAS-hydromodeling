@@ -50,8 +50,9 @@ warnings.filterwarnings(
 # DEFAULT SETTINGS
 # ============================================================
 
+# Defaults are the paper years; override at runtime with --years (e.g. 2015:2023).
 NET_YEARS = [2015, 2016, 2017, 2018, 2019]
-ENTSOE_YEARS = range(2015, 2020)
+ENTSOE_YEARS = [2015, 2016, 2017, 2018, 2019]
 
 NETWORK_FILE = "base_s_100_elec_.nc"
 
@@ -97,6 +98,12 @@ MODEL_ALPHA = {
 }
 
 PLOT_TITLE = "Hydro"
+
+SUPPLEMENTARY_COUNTRY_ORDER = [
+    "NO", "FR", "SE", "CH", "IT", "ES", "AT", "RO", "PT", "GR",
+    "FI", "DE", "RS", "HR", "BA", "BG", "LV", "GB", "SK", "SI",
+    "CZ", "ME", "MK", "PL", "IE", "LT", "BE", "HU",
+]
 
 MIN_MONTHS_FOR_METRICS = 6
 MIN_EUROPE_WEEKLY_COVERAGE = MIN_PERIOD_COVERAGE
@@ -265,7 +272,24 @@ def parse_args():
         help="Output directory for generated figures.",
     )
 
+    parser.add_argument(
+        "--years",
+        default=None,
+        help=(
+            "Years to process, overriding the default paper years "
+            "(2015-2019). Example: '2015:2023', '2019' or '2015,2016'."
+        ),
+    )
+
     return parser.parse_args()
+
+
+def parse_years(value: str) -> list[int]:
+    if ":" in value:
+        start, end = value.split(":")
+        return list(range(int(start), int(end) + 1))
+
+    return [int(year) for year in value.replace(",", " ").split()]
 
 
 # ============================================================
@@ -458,9 +482,9 @@ def build_nopumped_dataset(df_base, countries, year, ch_electricity_maps_files):
 
 def load_entsoe_hydro_data(entsoe_production_path, electricity_maps_path):
     ch_electricity_maps_files = {
-        2017: electricity_maps_path / "CH_2017_electricity_maps.json",
-        2018: electricity_maps_path / "CH_2018_electricity_maps.json",
-        2019: electricity_maps_path / "CH_2019_electricity_maps.json",
+        year: electricity_maps_path / f"CH_{year}_electricity_maps.json"
+        for year in ENTSOE_YEARS
+        if (electricity_maps_path / f"CH_{year}_electricity_maps.json").exists()
     }
 
     hydro_data = {}
@@ -722,6 +746,233 @@ def kgess(obs, sim, min_points=5, eps=1e-12):
     return (kge_model - kge_benchmark) / denominator
 
 
+def kge_components(obs, sim, min_points=5, eps=1e-12, constant_corr=0.0):
+    """Return the three KGE' components (r, beta, gamma), consistent with kge0().
+
+    r     : Pearson correlation
+    beta  : bias ratio        = mean(sim) / mean(obs)
+    gamma : variability ratio = CV(sim) / CV(obs), CV = std/mean (ddof=0)  [Kling 2012]
+    """
+    obs = np.asarray(obs, dtype=float)
+    sim = np.asarray(sim, dtype=float)
+
+    mask = np.isfinite(obs) & np.isfinite(sim)
+    obs = obs[mask]
+    sim = sim[mask]
+
+    if obs.size < min_points:
+        return np.nan, np.nan, np.nan
+
+    mean_obs = np.mean(obs)
+    mean_sim = np.mean(sim)
+    std_obs = np.std(obs, ddof=0)
+    std_sim = np.std(sim, ddof=0)
+
+    if abs(mean_obs) < eps or abs(mean_sim) < eps or std_obs < eps:
+        return np.nan, np.nan, np.nan
+
+    beta = mean_sim / mean_obs
+
+    if std_sim < eps:
+        corr = constant_corr
+    else:
+        corr = np.corrcoef(obs, sim)[0, 1]
+    if not np.isfinite(corr):
+        corr = constant_corr
+
+    cv_obs = std_obs / mean_obs
+    cv_sim = std_sim / mean_sim
+
+    if abs(cv_obs) < eps:
+        return np.nan, np.nan, np.nan
+
+    gamma = cv_sim / cv_obs
+
+    if not np.isfinite(beta) or not np.isfinite(gamma):
+        return np.nan, np.nan, np.nan
+
+    return corr, beta, gamma
+
+
+# ============================================================
+# SUPPLEMENTARY TABLES
+# ============================================================
+
+HYDRO_CAPACITY_GW = {
+    "NO": (4.18, 26.19, 30.36), "FR": (7.72, 8.07, 15.79),
+    "SE": (3.34, 10.88, 14.22), "CH": (3.79, 7.38, 11.16),
+    "IT": (5.31, 5.69, 11.00),  "ES": (1.25, 8.76, 10.01),
+    "AT": (4.62, 3.27, 7.89),   "RO": (1.01, 5.16, 6.17),
+    "PT": (2.30, 1.37, 3.67),   "GR": (0.07, 2.97, 3.04),
+    "FI": (1.74, 1.29, 3.02),   "DE": (2.00, 0.19, 2.19),
+    "RS": (1.40, 0.79, 2.19),   "HR": (0.43, 1.43, 1.86),
+    "BA": (0.19, 1.38, 1.57),   "BG": (0.02, 1.50, 1.53),
+    "LV": (0.64, 0.88, 1.53),   "GB": (0.99, 0.53, 1.53),
+    "SK": (1.37, 0.08, 1.45),   "SI": (0.92, 0.08, 0.99),
+    "CZ": (0.08, 0.69, 0.76),   "ME": (0.31, 0.36, 0.67),
+    "MK": (0.04, 0.53, 0.57),   "PL": (0.22, 0.26, 0.48),
+    "IE": (0.22, 0.00, 0.22),   "LT": (0.00, 0.10, 0.10),
+    "BE": (0.08, 0.01, 0.09),   "HU": (0.02, 0.03, 0.05),
+}
+
+MODEL_TABLE_HEADERS = {
+    "PyPSA baseline": r"\shortstack{PyPSA\\baseline}",
+    "PyPSA + GloFAS-SABER": r"\shortstack{PyPSA +\\GloFAS-SABER}",
+    "PyPSA + EFAS-SABER": r"\shortstack{PyPSA +\\EFAS-SABER}",
+}
+
+KGE_COMPONENTS = [("R", r"{$r$}"), ("BETA", r"{$\beta$}"), ("GAMMA", r"{$\gamma$}")]
+
+
+def order_countries(results_df_weekly, country_order=SUPPLEMENTARY_COUNTRY_ORDER):
+    listed = [c for c in country_order if c in results_df_weekly.index]
+    remaining = [c for c in results_df_weekly.index if c not in listed]
+    return results_df_weekly.reindex(listed + remaining)
+
+
+def country_label(code):
+    return COUNTRY_NAMES.get(code, code).replace("&", r"\&")
+
+
+def export_kgess_latex(results_df_weekly, output_path):
+    """Table 1: installed capacity split plus weekly KGESS, best scenario in bold."""
+    df = order_countries(results_df_weekly)
+    metric_columns = [f"KGESS_{model_key(m)}" for m in ACTIVE_MODELS]
+
+    body_rows = []
+    for code, row in df.iterrows():
+        capacities = HYDRO_CAPACITY_GW.get(code, (np.nan, np.nan, np.nan))
+        rounded = [
+            np.nan if pd.isna(row.get(col)) else round(float(row.get(col)), 2)
+            for col in metric_columns
+        ]
+        finite = [v for v in rounded if not pd.isna(v)]
+        best = max(finite) if finite else None
+
+        cells = []
+        for value in rounded:
+            if pd.isna(value):
+                text = "n/a"
+            else:
+                text = f"{value:.2f}".replace("-", "$-$")
+                if value == best:
+                    text = r"\textbf{" + text + "}"
+            cells.append(text.ljust(14))
+
+        capacity_cells = " & ".join(
+            "  n/a" if pd.isna(v) else f"{v:5.2f}" for v in capacities
+        )
+        body_rows.append(
+            f"    {country_label(code):<15} & {capacity_cells} & "
+            + " & ".join(cells)
+            + r" \\"
+        )
+
+    header = [
+        r"    \multirow{2}{*}{Country}",
+        r"      & \multirow{2}{*}{\shortstack{RoR\\{[GW]}}}",
+        r"      & \multirow{2}{*}{\shortstack{Reservoir\\{[GW]}}}",
+        r"      & \multirow{2}{*}{\shortstack{Total\\{[GW]}}}",
+        r"      & \multicolumn{%d}{c}{KGESS} \\" % len(ACTIVE_MODELS),
+        r"    \cmidrule(lr){5-%d}" % (4 + len(ACTIVE_MODELS)),
+        "      & & & &",
+        "      "
+        + " &\n      ".join(MODEL_TABLE_HEADERS.get(m, m) for m in ACTIVE_MODELS)
+        + r" \\",
+    ]
+
+    content = [
+        r"\begin{table}[H]",
+        r"  \centering",
+        r"  \small",
+        r"  \setlength{\tabcolsep}{6pt}",
+        r"  \caption{Installed hydropower capacity (run-of-river and reservoir, pumped hydro",
+        r"           storage excluded) per country, and weekly KGESS performance metrics for",
+        r"           each simulation scenario. Bold values indicate the best-performing scenario",
+        r"           for each country.}",
+        r"  \label{tab:hydro_kgess}",
+        r"  \begin{tabular}{l r r r" + " r" * len(ACTIVE_MODELS) + "}",
+        r"    \toprule",
+        *header,
+        r"    \midrule",
+        *body_rows,
+        r"    \bottomrule",
+        r"  \end{tabular}",
+        r"\end{table}",
+    ]
+
+    Path(output_path).write_text("\n".join(content) + "\n", encoding="utf-8")
+    return output_path
+
+
+def export_kge_components_latex(results_df_weekly, output_path):
+    """Table 2: weekly KGE' decomposition (r, beta, gamma) per country and scenario."""
+    df = order_countries(results_df_weekly)
+    n_comp = len(KGE_COMPONENTS)
+
+    body_rows = []
+    for code, row in df.iterrows():
+        cells = []
+        for model_name in ACTIVE_MODELS:
+            key = model_key(model_name)
+            for prefix, _ in KGE_COMPONENTS:
+                value = row.get(f"{prefix}_{key}")
+                cells.append("{n/a}" if pd.isna(value) else f"{value:.2f}")
+        body_rows.append(
+            f"    {country_label(code):<15} & "
+            + " & ".join(cell.rjust(5) for cell in cells)
+            + r" \\"
+        )
+
+    group_headers = [
+        r"      & \multicolumn{%d}{c}{%s}" % (n_comp, name) for name in ACTIVE_MODELS
+    ]
+    group_headers[-1] += r" \\"
+
+    header = [
+        r"    \multirow{2}{*}{Country}",
+        *group_headers,
+        "    "
+        + "".join(
+            r"\cmidrule(lr){%d-%d}" % (2 + i * n_comp, 1 + (i + 1) * n_comp)
+            for i in range(len(ACTIVE_MODELS))
+        ),
+        "      & "
+        + "\n      & ".join(
+            " & ".join(label for _, label in KGE_COMPONENTS) for _ in ACTIVE_MODELS
+        )
+        + r" \\",
+    ]
+
+    content = [
+        r"\begin{table}[H]",
+        r"  \centering",
+        r"  \small",
+        r"  \sisetup{table-format=-1.2, table-number-alignment=center}",
+        r"  \setlength{\tabcolsep}{5pt}",
+        r"  \caption{Weekly KGE$'$ decomposition per country for each simulation scenario:",
+        r"    correlation $r$, bias ratio $\beta=\mu_{\mathrm{sim}}/\mu_{\mathrm{obs}}$, and",
+        r"    variability ratio $\gamma=\mathrm{CV}_{\mathrm{sim}}/\mathrm{CV}_{\mathrm{obs}}$",
+        r"    (Kling et al., 2012). These are the components of the model--ENTSO-E KGE$'$; the",
+        r"    corresponding skill scores (KGESS) are reported in Table~\ref{tab:hydro_kgess}.",
+        r"    A perfect match yields $r=\beta=\gamma=1$; $\beta<1$ ($\beta>1$) indicates under-",
+        r"    (over-)estimation of the mean, and $\gamma<1$ ($\gamma>1$) under- (over-)estimation",
+        r"    of variability. Countries are ordered by installed hydropower capacity.}",
+        r"  \label{tab:hydro_kge_components}",
+        r"  \begin{tabular}{l " + " ".join(["S" * n_comp] * len(ACTIVE_MODELS)) + "}",
+        r"    \toprule",
+        *header,
+        r"    \midrule",
+        *body_rows,
+        r"    \bottomrule",
+        r"  \end{tabular}",
+        r"\end{table}",
+    ]
+
+    Path(output_path).write_text("\n".join(content) + "\n", encoding="utf-8")
+    return output_path
+
+
 # ============================================================
 # DATASET BUILDERS
 # ============================================================
@@ -866,6 +1117,14 @@ def compute_country_weekly_metrics(entsoe_all, model_all):
             country_results[f"N_WEEKS_{metric_name}"] = int(
                 df_weekly[model_name].notna().sum()
             )
+
+            r_model, beta_model, gamma_model = kge_components(
+                df_weekly_metric["ENTSOE"],
+                df_weekly_metric[model_name],
+            )
+            country_results[f"R_{metric_name}"] = r_model
+            country_results[f"BETA_{metric_name}"] = beta_model
+            country_results[f"GAMMA_{metric_name}"] = gamma_model
 
         results_weekly.append(country_results)
 
@@ -1078,18 +1337,18 @@ def plot_weekly_series(df_weekly, kgess_values, title_prefix, output_path, count
     )
 
     plot_start_year = df_weekly.index.min().year
-    plot_end_year = df_weekly.index.max().year
+    plot_end_year = (df_weekly.index.max() - pd.Timedelta(days=6)).year
 
     if countries_label is None:
         title = (
             f"{title_prefix} — Weekly {PLOT_TITLE} "
-            f"{plot_start_year}-{plot_end_year - 1}\n"
+            f"{plot_start_year}-{plot_end_year}\n"
             f"KGESS → {kgess_text}"
         )
     else:
         title = (
             f"{title_prefix} — Weekly {PLOT_TITLE} "
-            f"{plot_start_year}-{plot_end_year - 1}\n"
+            f"{plot_start_year}-{plot_end_year}\n"
             f"Countries: {countries_label}\n"
             f"KGESS → {kgess_text}"
         )
@@ -1808,12 +2067,27 @@ def plot_supplementary_group(group_name, countries, entsoe_all, model_all, outpu
 # COUNTRY KGESS MAP  (figure 4 — red/blue diverging, version 2)
 # ============================================================
 
-def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_path, output_path):
-    shapes_year = 2019
+MAP_NODATA_COLOR = "#d9d9d9"
+MAP_EUROPE_XLIM = (-12, 35)
+MAP_EUROPE_YLIM = (34, 72)
+MAP_LABEL_FONTSIZE = 8
+MAP_SHAPES_YEAR = 2019
 
+# Diverging red-white-blue ramp: red = poor, blue = good.
+MAP_QUALITY_CMAP = LinearSegmentedColormap.from_list(
+    "red_white_blue",
+    [
+        "#d73027", "#f46d43", "#fdae61", "#ffffff",
+        "#9ecae1", "#3182bd", "#08519c",
+    ],
+)
+
+
+def build_country_geodataframe(results_df_weekly, hydro_results_path):
+    """Country shapes joined to the per-country metrics, with label centroids."""
     regions_path = (
         hydro_results_path
-        / f"PyPSA_{shapes_year}"
+        / f"PyPSA_{MAP_SHAPES_YEAR}"
         / "country_shapes.geojson"
     )
 
@@ -1841,6 +2115,135 @@ def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_pat
     gdf["centroid_x"] = centroids.x
     gdf["centroid_y"] = centroids.y
 
+    return gdf
+
+
+KGE_COMPONENT_TICK_FACTORS = [1.0, 1.1, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0]
+
+
+def plot_country_kge_components_map(results_df_weekly, hydro_results_path, output_path):
+    """Maps of the three KGE' components, one row per component.
+
+    All three components share the ideal value 1, so colour always encodes the
+    distance from that ideal: blue at the ideal, red far from it. For the ratio
+    components the scale is folded on |ln x|, so 0.5 and 2.0 are penalised
+    equally; the printed value still shows the direction of the error.
+    """
+    gdf = build_country_geodataframe(results_df_weekly, hydro_results_path)
+
+    keys = [model_key(m) for m in ACTIVE_MODELS]
+    rows = [("R", "$r$", False), ("BETA", r"$\beta$", True), ("GAMMA", r"$\gamma$", True)]
+
+    missing = [
+        f"{prefix}_{k}" for prefix, _, _ in rows for k in keys
+        if f"{prefix}_{k}" not in gdf.columns
+    ]
+    if missing:
+        raise ValueError(f"Missing KGE component columns: {missing}")
+
+    def folded(values):
+        return np.abs(np.log(pd.to_numeric(values, errors="coerce")))
+
+    r_vals = gdf[[f"R_{k}" for k in keys]].stack().dropna()
+    r_norm = Normalize(vmin=np.floor(r_vals.min() * 10) / 10, vmax=1.0)
+
+    # One shared cap for beta and gamma, so bias and variability are comparable.
+    ratio_vals = gdf[[f"{p_}_{k}" for p_ in ("BETA", "GAMMA") for k in keys]].stack().dropna()
+    d_max = folded(ratio_vals).max()
+    cap = next(
+        (np.log(f) for f in KGE_COMPONENT_TICK_FACTORS if np.log(f) >= d_max),
+        float(d_max),
+    )
+    ratio_norm = Normalize(vmin=0.0, vmax=cap)
+
+    fig, axes = plt.subplots(3, 3, figsize=(22, 23))
+    plt.subplots_adjust(
+        wspace=0.02, hspace=0.04, left=0.015, right=0.885, top=0.955, bottom=0.015
+    )
+
+    for row_i, (prefix, row_label, is_ratio) in enumerate(rows):
+        norm = ratio_norm if is_ratio else r_norm
+        cmap = MAP_QUALITY_CMAP.reversed() if is_ratio else MAP_QUALITY_CMAP
+
+        for col_i, (model_name, key) in enumerate(zip(ACTIVE_MODELS, keys)):
+            ax = axes[row_i, col_i]
+            col = f"{prefix}_{key}"
+
+            gdf[gdf[col].isna()].plot(
+                ax=ax, color=MAP_NODATA_COLOR, edgecolor="black", linewidth=0.5
+            )
+
+            valid = gdf[gdf[col].notna()].copy()
+            valid["_scaled"] = folded(valid[col]) if is_ratio else valid[col].astype(float)
+            valid.plot(
+                ax=ax, column="_scaled", cmap=cmap, norm=norm,
+                edgecolor="black", linewidth=0.5,
+            )
+
+            for _, row in valid.iterrows():
+                shade = norm(row["_scaled"])
+                if is_ratio:
+                    shade = 1 - shade
+                ax.annotate(
+                    f"{float(row[col]):.2f}",
+                    xy=(row["centroid_x"], row["centroid_y"]),
+                    ha="center", va="center",
+                    fontsize=MAP_LABEL_FONTSIZE,
+                    color="white" if (shade > 0.85 or shade < 0.15) else "black",
+                    fontweight="bold",
+                    clip_on=True,
+                )
+
+            ax.set_xlim(*MAP_EUROPE_XLIM)
+            ax.set_ylim(*MAP_EUROPE_YLIM)
+            ax.axis("off")
+
+            if row_i == 0:
+                ax.set_title(model_name, fontsize=15, fontweight="bold", pad=8)
+            if col_i == 0:
+                ax.text(
+                    -0.02, 0.5, row_label, transform=ax.transAxes,
+                    fontsize=22, fontweight="bold",
+                    ha="center", va="center", rotation=90,
+                )
+
+        pos = axes[row_i, 2].get_position()
+        cax = fig.add_axes([0.895, pos.y0 + 0.06, 0.013, (pos.y1 - pos.y0) - 0.12])
+        sm = ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, cax=cax)
+
+        if is_ratio:
+            ticks = [
+                np.log(f) for f in KGE_COMPONENT_TICK_FACTORS
+                if np.log(f) <= norm.vmax + 1e-9
+            ]
+            cbar.set_ticks(ticks)
+            cbar.set_ticklabels([
+                "1.00" if np.isclose(t, 0.0) else f"×{np.exp(t):g} or ÷{np.exp(t):g}"
+                for t in ticks
+            ])
+            cbar.set_label("deviation from the ideal value 1", fontsize=13, labelpad=10)
+        else:
+            cbar.set_label("$r$", fontsize=14, labelpad=10)
+
+        cbar.ax.tick_params(labelsize=11)
+
+    fig.legend(
+        handles=[mpatches.Patch(color=MAP_NODATA_COLOR, label="No data")],
+        loc="lower right",
+        bbox_to_anchor=(0.995, 0.005),
+        fontsize=11,
+        frameon=True,
+        edgecolor="black",
+    )
+
+    save_figure(fig, output_path)
+
+
+def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_path, output_path):
+    gdf = build_country_geodataframe(results_df_weekly, hydro_results_path)
+
     metric_cols = [f"KGESS_{model_key(m)}" for m in ACTIVE_MODELS]
     subplot_titles = list(ACTIVE_MODELS)
 
@@ -1848,19 +2251,11 @@ def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_pat
     if missing_cols:
         raise ValueError(f"Missing metric columns in results_df_weekly: {missing_cols}")
 
-    nodata_color = "#d9d9d9"
-    europe_xlim = (-12, 35)
-    europe_ylim = (34, 72)
-    label_fontsize = 8
-
-    # Diverging red-white-blue colormap, symmetric around 0.
-    rb_cmap = LinearSegmentedColormap.from_list(
-        "red_white_blue",
-        [
-            "#d73027", "#f46d43", "#fdae61", "#ffffff",
-            "#9ecae1", "#3182bd", "#08519c",
-        ],
-    )
+    nodata_color = MAP_NODATA_COLOR
+    europe_xlim = MAP_EUROPE_XLIM
+    europe_ylim = MAP_EUROPE_YLIM
+    label_fontsize = MAP_LABEL_FONTSIZE
+    rb_cmap = MAP_QUALITY_CMAP
 
     all_vals = gdf[metric_cols].stack().dropna()
     abs_max = max(abs(all_vals.min()), abs(all_vals.max()), 0.01)
@@ -2188,6 +2583,22 @@ def run_processing_historical(
             output_path=supplementary_dir / f"weekly_comparison_{group_name}.png",
         )
 
+    export_kgess_latex(
+        results_df_weekly,
+        output_path=supplementary_dir / "table_s1_kgess.txt",
+    )
+
+    export_kge_components_latex(
+        results_df_weekly,
+        output_path=supplementary_dir / "table_s2_kge_components.txt",
+    )
+
+    plot_country_kge_components_map(
+        results_df_weekly=results_df_weekly,
+        hydro_results_path=hydro_results_path,
+        output_path=supplementary_dir / "kge_components_country_map.png",
+    )
+
     logger.info("Historical figures saved to: %s", output_dir)
 
 
@@ -2195,6 +2606,12 @@ def main() -> None:
     setup_logging()
 
     args = parse_args()
+
+    if args.years:
+        global NET_YEARS, ENTSOE_YEARS
+        NET_YEARS = parse_years(args.years)
+        ENTSOE_YEARS = list(NET_YEARS)
+        logger.info("Processing years: %s", NET_YEARS)
 
     run_processing_historical(
         hydro_results_path=args.hydro_results,
