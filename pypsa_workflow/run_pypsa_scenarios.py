@@ -103,7 +103,7 @@ def restore_active_config(
 def build_scenarios(repo_root: Path) -> list[Scenario]:
     scenarios: list[Scenario] = []
 
-    for year in range(2015, 2020):
+    for year in range(2015, 2024):
         scenarios.append(
             Scenario(
                 name=f"pypsa_{year}",
@@ -113,7 +113,7 @@ def build_scenarios(repo_root: Path) -> list[Scenario]:
             )
         )
 
-    for year in range(2015, 2020):
+    for year in range(2015, 2024):
         scenarios.append(
             Scenario(
                 name=f"glofas_{year}",
@@ -123,7 +123,7 @@ def build_scenarios(repo_root: Path) -> list[Scenario]:
             )
         )
 
-    for year in range(2015, 2020):
+    for year in range(2015, 2024):
         scenarios.append(
             Scenario(
                 name=f"efas_{year}",
@@ -151,6 +151,24 @@ def build_scenarios(repo_root: Path) -> list[Scenario]:
                 name="efas_2050",
                 config=repo_root / "config" / "planning_2050" / "efas_2050.yaml",
                 target="results/EFAS_Europe_2050/networks/base_s_100___2050.nc",
+                mode="sector_2050",
+            ),
+            Scenario(
+                name="pypsa_2050_multiyear",
+                config=repo_root / "config" / "planning_2050" / "pypsa_2050_multiyear.yaml",
+                target="results/PyPSA_Europe_2050_MultiYear/networks/base_s_100___2050.nc",
+                mode="sector_2050",
+            ),
+            Scenario(
+                name="glofas_2050_multiyear",
+                config=repo_root / "config" / "planning_2050" / "glofas_2050_multiyear.yaml",
+                target="results/GloFAS_Europe_2050_MultiYear/networks/base_s_100___2050.nc",
+                mode="sector_2050",
+            ),
+            Scenario(
+                name="efas_2050_multiyear",
+                config=repo_root / "config" / "planning_2050" / "efas_2050_multiyear.yaml",
+                target="results/EFAS_Europe_2050_MultiYear/networks/base_s_100___2050.nc",
                 mode="sector_2050",
             ),
         ]
