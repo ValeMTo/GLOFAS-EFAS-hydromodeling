@@ -422,6 +422,41 @@ data/pypsa/Europe_inflow_2019_GloFAS_SABER.nc
 data/pypsa/Europe_inflow_2019_EFAS_SABER.nc
 ```
 
+### Expanding-window (causal) calibration
+
+The last four steps are not run once over the whole period. They are repeated
+for every inflow year, each time calibrating SABER only on the years strictly
+before it:
+
+```text
+saber_preprocessing.py
+write_saber_config.py
+run_saber.py
+saber_to_pypsa.py
+```
+
+For year *Y* the framework sets `SABER_CALIBRATION_END=Y-1` and
+`SABER_INFLOW_YEARS=Y`, so the 2019 inflows are corrected with coefficients
+fitted on 2015-2018 alone. No observation from the target year, or after it,
+ever reaches its own bias correction. This is what makes the historical
+comparison against ENTSO-E a genuine out-of-sample validation rather than a
+fit.
+
+The set of years comes from `pypsa_inflow_years` in `hydro_inflow/hydro_config.py`,
+and can be overridden for a partial re-run:
+
+```bash
+SABER_EXPANDING_YEARS="2020 2021" python main.py --from-step run-hydro-inflow --to-step run-hydro-inflow
+```
+
+The 2050 scenarios need the opposite choice. There is no observation to be
+honest about in a future projection, so throwing away most of the record would
+only add noise; they use inflows calibrated on the full period instead, written
+as `Europe_inflow_<year>_<DATASET>_SABER_FULLCAL.nc` by
+`analysis/run_glofas_saber_fullcal_standalone.py`. That script overwrites the
+shared SABER intermediates, so back them up first and restore them before the
+next historical run.
+
 Diagnostic plots are disabled by default. They can be enabled with:
 
 ```bash
