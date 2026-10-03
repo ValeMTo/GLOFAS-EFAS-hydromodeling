@@ -327,7 +327,13 @@ def build_annual_totals_from_hourly(
             valid_hours = int(series.notna().sum())
             coverage = valid_hours / expected_hours if expected_hours > 0 else np.nan
 
-            hydro_generation_mwh = float(series.sum())
+            # Extrapolate the valid-hour mean to the full year: the comparison
+            # uses period means over valid weeks, so a raw sum over a gappy
+            # series would bias the PyPSA scaling low by the coverage fraction.
+            observed_mwh = float(series.sum())
+            hydro_generation_mwh = (
+                float(series.mean()) * expected_hours if valid_hours else np.nan
+            )
 
             if country == "CH" and year in ch_electricity_maps_years:
                 source = "ELECTRICITY_MAPS_CH"
@@ -340,6 +346,7 @@ def build_annual_totals_from_hourly(
                     "country": country,
                     "hydro_generation_mwh": hydro_generation_mwh,
                     "hydro_generation_twh": hydro_generation_mwh / 1e6,
+                    "hydro_generation_mwh_observed": observed_mwh,
                     "valid_hours": valid_hours,
                     "expected_hours": expected_hours,
                     "coverage": coverage,
