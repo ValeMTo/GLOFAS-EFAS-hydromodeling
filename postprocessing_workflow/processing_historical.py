@@ -51,8 +51,8 @@ warnings.filterwarnings(
 # ============================================================
 
 # Defaults are the paper years; override at runtime with --years (e.g. 2015:2023).
-NET_YEARS = [2015, 2016, 2017, 2018, 2019]
-ENTSOE_YEARS = [2015, 2016, 2017, 2018, 2019]
+NET_YEARS = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]
+ENTSOE_YEARS = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]
 
 NETWORK_FILE = "base_s_100_elec_.nc"
 
@@ -1916,9 +1916,9 @@ def plot_country_model_panels(panels, output_path, per_row_height=2.6, fixed_wid
         if len(all_dates):
             ax.set_xlim(all_dates.min(), all_dates.max())
 
-    axes[-1].xaxis.set_major_locator(mdates.MonthLocator(bymonth=[1, 4, 7, 10]))
-    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%b"))
-    fig.autofmt_xdate(rotation=30, ha="right")
+    axes[-1].xaxis.set_major_locator(mdates.YearLocator())
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    fig.autofmt_xdate(rotation=0, ha="center")
 
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
@@ -2070,7 +2070,7 @@ def plot_supplementary_group(group_name, countries, entsoe_all, model_all, outpu
 MAP_NODATA_COLOR = "#d9d9d9"
 MAP_EUROPE_XLIM = (-12, 35)
 MAP_EUROPE_YLIM = (34, 72)
-MAP_LABEL_FONTSIZE = 8
+MAP_LABEL_FONTSIZE = 10
 MAP_SHAPES_YEAR = 2019
 
 # Diverging red-white-blue ramp: red = poor, blue = good.
@@ -2220,7 +2220,7 @@ def plot_country_kge_components_map(results_df_weekly, hydro_results_path, outpu
             ]
             cbar.set_ticks(ticks)
             cbar.set_ticklabels([
-                "1.00" if np.isclose(t, 0.0) else f"×{np.exp(t):g} or ÷{np.exp(t):g}"
+                "1.00" if np.isclose(t, 0.0) else f"×{np.exp(t):g}  or  1/{np.exp(t):g}"
                 for t in ticks
             ])
             cbar.set_label("deviation from the ideal value 1", fontsize=13, labelpad=10)
@@ -2318,11 +2318,13 @@ def plot_country_kgess_map(results_df_weekly, available_years, hydro_results_pat
     cbar.set_label("KGESS", fontsize=13)
     cbar.ax.tick_params(labelsize=11)
 
+    # Under the colorbar, so the tight bbox doesn't keep blank space on the right.
+    cbar_pos = cax.get_position()
     patch = mpatches.Patch(color=nodata_color, label="No data")
     fig.legend(
         handles=[patch],
-        loc="lower right",
-        bbox_to_anchor=(0.995, 0.02),
+        loc="upper center",
+        bbox_to_anchor=((cbar_pos.x0 + cbar_pos.x1) / 2, cbar_pos.y0 - 0.04),
         fontsize=10,
         frameon=True,
         edgecolor="black",
