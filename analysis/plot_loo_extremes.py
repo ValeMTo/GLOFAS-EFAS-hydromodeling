@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Figure: SABER LOO extremes validation - quantile ratio (Qsim/Qobs) per percentile,
-raw GloFAS vs SABER-LOO corrected, for the low-flow and high-flow tails."""
+"""Figure S9: SABER LOO extremes validation - quantile ratio (Qsim/Qobs) per percentile,
+raw GloFAS vs SABER-LOO corrected, for the low-flow (S9a) and high-flow (S9b) tails.
+Saved as two separate images sharing the same y-axis, matching the paper's subcaption style."""
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -31,9 +32,35 @@ def series_for(prefix, pct):
     return ok[col].dropna().values
 
 
-def draw_panel(ax, pcts, title):
+def collect_panel_data(pcts):
     raw_data = [series_for("raw", p) for p in pcts]
     loo_data = [series_for("loo", p) for p in pcts]
+    return raw_data, loo_data
+
+
+def whisker_extent(arr):
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = q3 - q1
+    lo_fence, hi_fence = q1 - 1.5*iqr, q3 + 1.5*iqr
+    inside = arr[(arr >= lo_fence) & (arr <= hi_fence)]
+    return inside.min(), inside.max()
+
+
+def shared_ylim(*panel_data_lists):
+    los, his = [], []
+    for panel_data in panel_data_lists:
+        for arr in panel_data:
+            if len(arr) == 0:
+                continue
+            lo, hi = whisker_extent(arr)
+            los.append(lo); his.append(hi)
+    lo, hi = min(los), max(his)
+    pad = 0.05 * (hi - lo)
+    return lo - pad, hi + pad
+
+
+def draw_panel(pcts, title, ylim, raw_data, loo_data, outfile):
+    fig, ax = plt.subplots(figsize=(8, 5.5))
     x = np.arange(1, len(pcts) + 1)
     width = 0.35
 
@@ -52,21 +79,23 @@ def draw_panel(ax, pcts, title):
     ax.set_xticks(x)
     ax.set_xticklabels(pcts, fontsize=8)
     ax.set_xlim(0.5, len(pcts) + 0.5)
+    ax.set_ylim(*ylim)
     ax.set_xlabel("Percentile", fontsize=11)
+    ax.set_ylabel("Quantile Ratio (Qsim / Qobs)", fontsize=11)
     ax.set_title(title, fontsize=12, fontweight="bold")
     ax.grid(alpha=0.25, axis="y")
-    return bp_raw, bp_loo
+    ax.legend([bp_raw["boxes"][0], bp_loo["boxes"][0]], [RAW_LABEL, LOO_LABEL],
+              loc="upper right", frameon=True, framealpha=0.9, fontsize=10)
+    fig.tight_layout()
+    fig.savefig(outfile, dpi=200, bbox_inches="tight")
+    print("Saved:", outfile)
 
 
-fig, axs = plt.subplots(1, 2, figsize=(14, 5.5))
-draw_panel(axs[0], LOW_PCTS, "(a) Low flow")
-bp_raw, bp_loo = draw_panel(axs[1], HIGH_PCTS, "(d) High flow")
-axs[0].set_ylabel("Quantile Ratio (Qsim / Qobs)", fontsize=11)
+low_raw, low_loo = collect_panel_data(LOW_PCTS)
+high_raw, high_loo = collect_panel_data(HIGH_PCTS)
+ylim = shared_ylim(low_raw, low_loo, high_raw, high_loo)
 
-fig.legend([bp_raw["boxes"][0], bp_loo["boxes"][0]], [RAW_LABEL, LOO_LABEL],
-           loc="upper center", ncol=2, frameon=False, fontsize=10, bbox_to_anchor=(0.5, 1.03))
-fig.suptitle(f"SABER LOO validation: quantile ratio at flow extremes ({len(ok)} gauges)",
-             fontsize=13, y=1.08)
-fig.tight_layout()
-fig.savefig(OUT/"loo_extremes_quantile_ratio_tails.png", dpi=200, bbox_inches="tight")
-print("Saved:", OUT/"loo_extremes_quantile_ratio_tails.png")
+draw_panel(LOW_PCTS, "Low flow", ylim, low_raw, low_loo,
+           OUT/"loo_extremes_quantile_ratio_S9a.png")
+draw_panel(HIGH_PCTS, "High flow", ylim, high_raw, high_loo,
+           OUT/"loo_extremes_quantile_ratio_S9b.png")

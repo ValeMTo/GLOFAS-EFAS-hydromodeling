@@ -13,6 +13,7 @@ import geopandas as gpd
 import matplotlib as mpl
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 import numpy as np
 import pandas as pd
 import pypsa
@@ -390,42 +391,100 @@ def build_baseline_absolute_series(
     return baseline_series
 
 
-def annotate_percentage_labels(ax, plot_df, baseline_series, bar_width):
+BAR_LABEL_FONTSIZE = 11
+STAGGER_LINE_FACTOR = 1.3
+
+
+def format_bar_value(value, unit):
+    sign = "+" if value >= 0 else ""
+    if unit == "%":
+        return f"{sign}{value:.1f}%"
+    return f"{sign}{value:.1f} {unit}"
+
+
+def add_bar_label(ax, x, bar_top, text, fontsize=BAR_LABEL_FONTSIZE, extra_pt=0.0):
+    up = bar_top >= 0
+    gap = 3 + extra_pt
+    return ax.annotate(
+        text,
+        xy=(x, bar_top),
+        xytext=(0, gap if up else -gap),
+        textcoords="offset points",
+        ha="center",
+        va="bottom" if up else "top",
+        fontsize=fontsize,
+        linespacing=0.95,
+        color="black",
+        zorder=5,
+    )
+
+
+def label_bar_group(ax, xs, values, texts, fontsize=BAR_LABEL_FONTSIZE, stagger=False):
+    """Label the bars of one category. With stagger, same-sign bars are labelled
+    from the longest bar of the group and stacked one line apart, so labels
+    wider than a bar neither collide nor sit on a neighbouring bar."""
+    labels = []
+    same_sign = all(v >= 0 for v in values) or all(v < 0 for v in values)
+    if stagger and same_sign and len(values) > 1:
+        anchor = max(values) if values[0] >= 0 else min(values)
+        for k, (x, text) in enumerate(zip(xs, texts)):
+            labels.append(add_bar_label(
+                ax, x, anchor, text, fontsize=fontsize,
+                extra_pt=k * STAGGER_LINE_FACTOR * fontsize,
+            ))
+    else:
+        for x, v, text in zip(xs, values, texts):
+            labels.append(add_bar_label(ax, x, v, text, fontsize=fontsize))
+    return labels
+
+
+def fit_ylim_to_labels(ax, labels, margin=0.03):
+    """Widen the y-limits until every bar label lies inside the axes."""
+    if not labels:
+        return
+    fig = ax.figure
+    for _ in range(4):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        inv = ax.transData.inverted()
+        lo, hi = ax.get_ylim()
+        need_lo, need_hi = lo, hi
+        for label in labels:
+            bb = label.get_window_extent(renderer)
+            (_, y0), (_, y1) = inv.transform([(bb.x0, bb.y0), (bb.x1, bb.y1)])
+            need_lo, need_hi = min(need_lo, y0), max(need_hi, y1)
+        if need_lo >= lo and need_hi <= hi:
+            return
+        span = need_hi - need_lo
+        ax.set_ylim(
+            need_lo - margin * span if need_lo < lo else lo,
+            need_hi + margin * span if need_hi > hi else hi,
+        )
+
+
+def annotate_percentage_labels(ax, plot_df, baseline_series, bar_width,
+                               fontsize=BAR_LABEL_FONTSIZE, stagger=False):
     n_scenarios = len(plot_df.columns)
     values = plot_df.to_numpy(dtype=float)
-
-    if values.size == 0:
-        return
-
-    y_offset = 0.02 * np.nanmax(np.abs(values))
+    labels = []
 
     for i, row_name in enumerate(plot_df.index):
         base = baseline_series.get(row_name, np.nan)
+        if pd.isna(base) or base == 0:
+            continue
 
+        xs, bars, texts = [], [], []
         for j in range(n_scenarios):
             abs_val = values[i, j]
-
-            if pd.isna(abs_val) or pd.isna(base) or base == 0:
+            if pd.isna(abs_val):
                 continue
+            xs.append(i + (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios))
+            bars.append(abs_val)
+            texts.append(format_bar_value(abs_val / base * 100, "%"))
 
-            pct_val = abs_val / base * 100
-            x_pos = i + (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios)
-            sign = "+" if pct_val >= 0 else ""
+        labels += label_bar_group(ax, xs, bars, texts, fontsize=fontsize, stagger=stagger)
 
-            ax.text(
-                x_pos,
-                abs_val + (y_offset if abs_val >= 0 else -y_offset),
-                f"{sign}{pct_val:.1f}%",
-                ha="center",
-                va="bottom" if abs_val >= 0 else "top",
-                fontsize=7.5,
-                color="black",
-                rotation=90,
-            )
-
-    bottom, top = ax.get_ylim()
-    pad = 0.18 * (top - bottom)
-    ax.set_ylim(bottom - pad, top + pad)
+    return labels
 
 
 def plot_grouped_bar_difference(
@@ -446,6 +505,10 @@ def plot_grouped_bar_difference(
         for col in plot_df.columns
     ]
 
+    # Many technologies -> bars are narrower than the labels, so stagger them.
+    crowded = len(plot_df.index) > 8
+    label_fontsize = BAR_LABEL_FONTSIZE - 1 if crowded else BAR_LABEL_FONTSIZE
+
     fixed_figsize = (10, 7)
 
     fig = plt.figure(figsize=fixed_figsize, facecolor="white")
@@ -463,11 +526,13 @@ def plot_grouped_bar_difference(
 
     ax.axhline(0, linewidth=1.0, color="black", zorder=4)
 
-    annotate_percentage_labels(
+    bar_labels = annotate_percentage_labels(
         ax=ax,
         plot_df=plot_df,
         baseline_series=baseline_series,
         bar_width=0.8,
+        fontsize=label_fontsize,
+        stagger=crowded,
     )
 
     ax.grid(
@@ -522,6 +587,7 @@ def plot_grouped_bar_difference(
         y_min - 0.25 * y_range,
         y_max + 0.25 * y_range,
     )
+    fit_ylim_to_labels(ax, bar_labels)
 
     save_figure(fig, output_path)
 
@@ -723,8 +789,10 @@ def make_optimal_capacity_pct_figure(networks, output_path):
 
     n_scenarios = len(pct_df.columns)
     bar_width = 0.8
+    bar_labels = []
 
     for i, tech in enumerate(pct_df.index):
+        xs, bars, texts = [], [], []
         for j, scenario in enumerate(pct_df.columns):
             pct_val = pct_df.loc[tech, scenario]
             abs_val = diff_df.loc[tech, scenario]
@@ -732,25 +800,11 @@ def make_optimal_capacity_pct_figure(networks, output_path):
             if pd.isna(pct_val) or pd.isna(abs_val):
                 continue
 
-            offset = (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios)
-            x_pos = i + offset
+            xs.append(i + (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios))
+            bars.append(pct_val)
+            texts.append(format_bar_value(abs_val, unit))
 
-            sign = "+" if abs_val >= 0 else ""
-            label = f"{sign}{abs_val:.1f} {unit}"
-
-            y_offset = 0.5 if pct_val >= 0 else -0.5
-            va = "bottom" if pct_val >= 0 else "top"
-
-            ax.text(
-                x_pos,
-                pct_val + y_offset,
-                label,
-                ha="center",
-                va=va,
-                fontsize=7.5,
-                color="black",
-                rotation=90,
-            )
+        bar_labels += label_bar_group(ax, xs, bars, texts, stagger=True)
 
     if show_baseline_values_in_xticks:
         xtick_labels = [
@@ -788,6 +842,7 @@ def make_optimal_capacity_pct_figure(networks, output_path):
         y_min - 0.30 * y_range,
         y_max + 0.30 * y_range,
     )
+    fit_ylim_to_labels(ax, bar_labels)
 
     save_figure(fig, output_path)
 
@@ -984,7 +1039,7 @@ def make_cost_difference_figure(networks, output_path):
         zorder=4,
     )
 
-    annotate_percentage_labels(
+    bar_labels = annotate_percentage_labels(
         ax=ax,
         plot_df=difference_plot_df,
         baseline_series=baseline_values,
@@ -1052,6 +1107,7 @@ def make_cost_difference_figure(networks, output_path):
     )
 
     ax.set_ylim(y_lower, y_upper)
+    fit_ylim_to_labels(ax, bar_labels)
 
     save_figure(fig, output_path)
 
@@ -1197,8 +1253,10 @@ def make_storage_difference_figure(networks, output_path):
 
     n_scenarios = len(pct_difference_df.columns)
     bar_width = 0.8
+    bar_labels = []
 
     for i, tech in enumerate(pct_difference_df.index):
+        xs, bars, texts = [], [], []
         for j, scenario in enumerate(pct_difference_df.columns):
             pct_val = pct_difference_df.loc[tech, scenario]
             abs_val = difference_df.loc[tech, scenario]
@@ -1206,25 +1264,11 @@ def make_storage_difference_figure(networks, output_path):
             if pd.isna(pct_val) or pd.isna(abs_val):
                 continue
 
-            offset = (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios)
-            x_pos = i + offset
+            xs.append(i + (j - (n_scenarios - 1) / 2) * (bar_width / n_scenarios))
+            bars.append(pct_val)
+            texts.append(format_bar_value(abs_val, unit))
 
-            sign = "+" if abs_val >= 0 else ""
-            label = f"{sign}{abs_val:.1f} {unit}"
-
-            y_offset = 0.5 if pct_val >= 0 else -0.5
-            va = "bottom" if pct_val >= 0 else "top"
-
-            ax.text(
-                x_pos,
-                pct_val + y_offset,
-                label,
-                ha="center",
-                va=va,
-                fontsize=7.5,
-                color="black",
-                rotation=90,
-            )
+        bar_labels += label_bar_group(ax, xs, bars, texts, stagger=True)
 
     xtick_labels = [
         f"{tech}\n(Baseline: {baseline_values.loc[tech]:.1f} {unit})"
@@ -1275,6 +1319,7 @@ def make_storage_difference_figure(networks, output_path):
         y_min - 0.30 * y_range,
         y_max + 0.30 * y_range,
     )
+    fit_ylim_to_labels(ax, bar_labels)
 
     save_figure(fig, output_path)
 
@@ -1565,6 +1610,22 @@ def system_price(network, carrier="AC"):
     return network.buses_t.marginal_price[cols].mean(axis=1)
 
 
+HYDRO_YEAR_INDEX_CSV = (
+    Path(__file__).resolve().parent.parent
+    / "analysis" / "hydro_year_index_out" / "hydrological_year_index.csv"
+)
+
+
+def _climate_year_category(calendar_year):
+    """Look up dry/normal/wet classification for a calendar year used as a
+    weather year, without exposing the calendar year itself in the figure."""
+    try:
+        df = pd.read_csv(HYDRO_YEAR_INDEX_CSV, index_col=0)
+        return str(df.loc[calendar_year, "EU_category"]).capitalize()
+    except Exception:
+        return None
+
+
 def make_soc_price_figure(networks, output_path, resample="D"):
     """Reservoir SOC (absolute, TWh) for the three scenarios, over a background
     heatmap of the mean-of-three system marginal price."""
@@ -1595,50 +1656,77 @@ def make_soc_price_figure(networks, output_path, resample="D"):
     vmin = np.nanpercentile(all_price_vals, 5)
     vmax = np.nanpercentile(all_price_vals, 95)
 
-    fig, ax = plt.subplots(figsize=(13, 5.5), facecolor="white")
-
     top = max(max_caps.values()) * 1.10
 
-    t_num = mdates.date2num(idx.to_pydatetime())
-    ax.imshow(
-        mean_price.values.reshape(1, -1),
-        aspect="auto",
-        cmap="YlOrRd",
-        extent=[t_num[0], t_num[-1], 0, top],
-        alpha=0.45,
-        zorder=0,
-        vmin=vmin,
-        vmax=vmax,
+    # --- the two concatenated climate years (dry/wet weather patterns, not
+    # calendar years meaningful for a 2050 scenario) get their own frame each,
+    # side by side in one figure, instead of one continuous axis with a
+    # boundary line or two separate output files ---
+    years_present = sorted(idx.year.unique())
+    if len(years_present) != 2:
+        raise ValueError(
+            f"Expected exactly 2 concatenated climate years, found {years_present}"
+        )
+
+    fig, axes = plt.subplots(
+        1, 2, figsize=(14, 5.5), facecolor="white",
+        sharey=True, gridspec_kw={"wspace": 0.05},
     )
 
-    for name, soc in soc_series.items():
-        ax.plot(
-            idx, soc.values,
-            label=name,
-            color=SCENARIO_COLORS.get(name),
-            linewidth=2.0,
-            zorder=3,
+    last_image = None
+    for i, (ax, year) in enumerate(zip(axes, years_present)):
+        mask = idx.year == year
+        sub_idx = idx[mask]
+        t_num = mdates.date2num(sub_idx.to_pydatetime())
+
+        last_image = ax.imshow(
+            mean_price[mask].values.reshape(1, -1),
+            aspect="auto",
+            cmap="YlOrRd",
+            extent=[t_num[0], t_num[-1], 0, top],
+            alpha=0.45,
+            zorder=0,
+            vmin=vmin,
+            vmax=vmax,
         )
 
-    for name, cap in max_caps.items():
-        ax.axhline(
-            cap,
-            color=SCENARIO_COLORS.get(name),
-            linestyle="--",
-            linewidth=1.3,
-            alpha=0.85,
-            zorder=4,
-            label=f"{name} — max ({cap:.0f} TWh)",
+        for name, soc in soc_series.items():
+            ax.plot(
+                sub_idx, soc[mask].values,
+                label=name if i == 0 else None,
+                color=SCENARIO_COLORS.get(name),
+                linewidth=2.0,
+                zorder=3,
+            )
+
+        for name, cap in max_caps.items():
+            ax.axhline(
+                cap,
+                color=SCENARIO_COLORS.get(name),
+                linestyle="--",
+                linewidth=1.3,
+                alpha=0.85,
+                zorder=4,
+                label=f"{name} — max ({cap:.0f} TWh)" if i == 0 else None,
+            )
+
+        ax.set_xlim(t_num[0], t_num[-1])
+        ax.set_ylim(0, top)
+        ax.set_xlabel("")
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        ax.xaxis.set_major_formatter(
+            FuncFormatter(lambda x, pos: mdates.num2date(x).strftime("%b")[0])
         )
+        ax.tick_params(labelsize=11)
 
-    ax.set_ylabel("Reservoir State-of-Charge [TWh]", fontsize=13)
-    ax.set_xlabel("")
-    ax.xaxis.set_major_locator(mdates.MonthLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
-    ax.tick_params(labelsize=11)
-    ax.set_ylim(0, top)
+        category = _climate_year_category(year)
+        title = f"Year {i + 1}" + (f" — {category} climate year" if category else "")
+        ax.set_title(title, fontsize=13, fontweight="bold", pad=10)
 
-    ax.legend(
+    axes[0].set_ylabel("Reservoir State-of-Charge [TWh]", fontsize=13)
+    axes[1].tick_params(axis="y", labelleft=False)
+
+    axes[0].legend(
         loc="upper left",
         frameon=True,
         framealpha=0.95,
@@ -1647,10 +1735,8 @@ def make_soc_price_figure(networks, output_path, resample="D"):
         ncol=1,
     )
 
-    cbar = fig.colorbar(ax.images[0], ax=ax, pad=0.01, fraction=0.04)
+    cbar = fig.colorbar(last_image, ax=axes, pad=0.015, fraction=0.035)
     cbar.set_label("System marginal price [€/MWh]", fontsize=12)
-
-    fig.tight_layout()
 
     save_figure(fig, output_path, bbox_inches="tight")
 
