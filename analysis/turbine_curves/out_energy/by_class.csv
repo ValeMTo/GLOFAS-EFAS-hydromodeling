@@ -1,0 +1,4 @@
+turbine_by_head,n_plants,GW,head_reported_share,E_paper_TWh,E_by_head_TWh,dE_pct
+francis,828,19.144,0.482,63.639,64.793,1.813
+kaplan,578,22.188,0.846,47.033,52.466,11.553
+pelton,147,3.912,0.993,16.837,18.471,9.704

@@ -1,0 +1,22 @@
+RoR ANNUAL ENERGY UNDER DIFFERENT TURBINE CURVES (head constant)
+==================================================================
+
+years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]   RoR plants: 1553 (45.24 GW)
+observed RoR (ENTSO-E, usable countries): 192.57 TWh/yr
+turbine by head: Kaplan < 30 m <= Francis < 300 m <= Pelton
+
+     scenario  E_TWh_per_year  dE_vs_paper_TWh  dE_vs_paper_pct  pct_of_observed_RoR
+   paper_ramp          127.51             0.00             0.00                66.21
+   all_kaplan          137.86            10.35             8.12                71.59
+  all_francis          130.63             3.12             2.44                67.83
+   all_pelton          148.84            21.33            16.73                77.29
+all_crossflow          148.67            21.16            16.59                77.20
+all_propeller          112.39           -15.12           -11.86                58.36
+      by_head          135.73             8.22             6.45                70.48
+
+BY HEAD-ASSIGNED CLASS
+                 n_plants     GW  head_reported_share  E_paper_TWh  E_by_head_TWh  dE_pct
+turbine_by_head                                                                          
+francis               828  19.14                 0.48        63.64          64.79    1.81
+kaplan                578  22.19                 0.85        47.03          52.47   11.55
+pelton                147   3.91                 0.99        16.84          18.47    9.70

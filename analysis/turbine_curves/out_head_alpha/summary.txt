@@ -1,0 +1,25 @@
+RoR ENERGY: TURBINE BY HEAD + VARIABLE NET HEAD (alpha sweep)
+==============================================================
+
+years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]   RoR plants: 1553 (45.24 GW), geometry matched: 1553
+low-head (< 15 m): 361 plants, 11.85 GW
+
+paper ramp, head constant          :   127.51 TWh/yr
+turbine by head, head constant     :   135.73 TWh/yr (+6.45 % vs paper)
+
+headwater in flood: gated barrage, pond held at regulation level
+alpha = 0: headwater regulated at a fixed level
+alpha = 1: headwater follows the river -> net head constant
+mode full: gain at part load + loss in flood; no_flood_loss: gain at part load only
+
+         mode  alpha  E_TWh_per_year  dE_head_only_pct  dE_head_only_lowhead_pct  dE_head_only_highhead_pct  dE_total_vs_paper_pct
+         full   0.00          136.22              0.36                      2.19                      -0.17                   6.84
+         full   0.25          136.10              0.27                      1.63                      -0.13                   6.74
+         full   0.50          135.98              0.18                      1.09                      -0.08                   6.64
+         full   0.75          135.85              0.09                      0.54                      -0.04                   6.54
+         full   1.00          135.73              0.00                      0.00                       0.00                   6.45
+no_flood_loss   0.00          137.66              1.43                      4.29                       0.58                   7.96
+no_flood_loss   0.25          137.18              1.07                      3.22                       0.44                   7.59
+no_flood_loss   0.50          136.70              0.71                      2.15                       0.29                   7.21
+no_flood_loss   0.75          136.21              0.36                      1.07                       0.15                   6.83
+no_flood_loss   1.00          135.73              0.00                      0.00                       0.00                   6.45

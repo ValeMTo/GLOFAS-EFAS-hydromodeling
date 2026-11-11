@@ -1,0 +1,8 @@
+scenario,E_TWh_per_year,dE_vs_paper_TWh,dE_vs_paper_pct,pct_of_observed_RoR
+paper_ramp,127.509,0.0,0.0,66.213
+all_kaplan,137.861,10.352,8.119,71.589
+all_francis,130.625,3.116,2.444,67.831
+all_pelton,148.843,21.334,16.731,77.292
+all_crossflow,148.667,21.158,16.593,77.2
+all_propeller,112.386,-15.123,-11.861,58.36
+by_head,135.73,8.221,6.447,70.482
