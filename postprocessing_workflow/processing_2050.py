@@ -1626,9 +1626,25 @@ def _climate_year_category(calendar_year):
         return None
 
 
-def make_soc_price_figure(networks, output_path, resample="D"):
-    """Reservoir SOC (absolute, TWh) for the three scenarios, over a background
-    heatmap of the mean-of-three system marginal price."""
+SCENARIO_SHORT_NAMES = {
+    "PyPSA + GloFAS-SABER": "GloFAS-SABER",
+    "PyPSA + EFAS-SABER": "EFAS-SABER",
+}
+
+
+def _cap_owners(names, max_caps):
+    """Who a maximum-volume line belongs to, kept short for the legend."""
+    if len(names) == len(max_caps):
+        return "all scenarios"
+    if len(names) > 2:
+        return "other scenarios"
+    return " and ".join(SCENARIO_SHORT_NAMES.get(n, n) for n in names)
+
+
+def make_soc_price_figure(networks, output_path, resample="D", price_networks=None):
+    """Reservoir SOC (absolute, TWh) for the given scenarios, over a background
+    heatmap of the mean system marginal price of `price_networks` (default:
+    the same networks whose SOC is plotted)."""
     soc_series = {
         name: reservoir_soc_twh(net)
         for name, net in networks.items()
@@ -1640,7 +1656,7 @@ def make_soc_price_figure(networks, output_path, resample="D"):
 
     prices = {
         name: system_price(net).resample(resample).mean()
-        for name, net in networks.items()
+        for name, net in (price_networks or networks).items()
     }
 
     idx = list(prices.values())[0].index
@@ -1657,6 +1673,14 @@ def make_soc_price_figure(networks, output_path, resample="D"):
     vmax = np.nanpercentile(all_price_vals, 95)
 
     top = max(max_caps.values()) * 1.10
+
+    # one dashed line and one legend entry per distinct maximum: scenarios
+    # sharing a reservoir volume drew overlapping lines, of which only the
+    # last one was visible, while each still took a legend row. The line keeps
+    # the colour of that last scenario, so the plot looks the same.
+    cap_lines = {}
+    for name, cap in max_caps.items():
+        cap_lines.setdefault(f"{cap:.3g}", []).append(name)
 
     # --- the two concatenated climate years (dry/wet weather patterns, not
     # calendar years meaningful for a 2050 scenario) get their own frame each,
@@ -1699,15 +1723,16 @@ def make_soc_price_figure(networks, output_path, resample="D"):
                 zorder=3,
             )
 
-        for name, cap in max_caps.items():
+        for label, names in cap_lines.items():
             ax.axhline(
-                cap,
-                color=SCENARIO_COLORS.get(name),
+                max_caps[names[0]],
+                color=SCENARIO_COLORS.get(names[-1]),
                 linestyle="--",
                 linewidth=1.3,
                 alpha=0.85,
                 zorder=4,
-                label=f"{name} — max ({cap:.0f} TWh)" if i == 0 else None,
+                label=(f"{label} TWh (max volume, {_cap_owners(names, max_caps)})"
+                       if i == 0 else None),
             )
 
         ax.set_xlim(t_num[0], t_num[-1])
