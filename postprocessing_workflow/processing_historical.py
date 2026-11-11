@@ -1299,6 +1299,60 @@ def build_europe_weekly_series(entsoe_all, model_all):
     return df_weekly_eu, kgess_values_eu, available_years
 
 
+KGESS_SUBPERIODS = [(2015, 2019), (2020, 2023)]
+
+
+def report_europe_kgess_subperiods(df_weekly_eu, output_path=None,
+                                   subperiods=KGESS_SUBPERIODS):
+    """Europe-aggregate KGESS recomputed over sub-periods of the record.
+
+    The validation window was extended from 2015-2019 to 2015-2023; splitting
+    the aggregate shows whether the skill holds on years the original study
+    never saw. Weeks are assigned by the year of their (right-hand) label, so
+    a week straddling a boundary counts towards the later period.
+    """
+    metric_columns = ["ENTSO-E"] + ACTIVE_MODELS
+    df = df_weekly_eu.dropna(subset=metric_columns)
+
+    rows = []
+    spans = [(df.index.year.min(), df.index.year.max())] + list(subperiods)
+
+    for start, end in spans:
+        mask = (df.index.year >= start) & (df.index.year <= end)
+        sub = df.loc[mask]
+
+        if sub.empty:
+            logger.warning("No weekly data for Europe in %s-%s", start, end)
+            continue
+
+        scores = {
+            model_name: kgess(sub["ENTSO-E"], sub[model_name])
+            for model_name in ACTIVE_MODELS
+        }
+        rows.append((f"{start}-{end}", len(sub), scores))
+
+    header = f"{'period':<12}{'weeks':>7}" + "".join(
+        f"{m:>24}" for m in ACTIVE_MODELS
+    )
+    lines = ["Europe-aggregate weekly KGESS by period", "", header, "-" * len(header)]
+
+    for label, n_weeks, scores in rows:
+        lines.append(
+            f"{label:<12}{n_weeks:>7}"
+            + "".join(f"{scores[m]:>24.3f}" for m in ACTIVE_MODELS)
+        )
+
+    text = "\n".join(lines)
+
+    for line in lines:
+        logger.info("%s", line)
+
+    if output_path is not None:
+        Path(output_path).write_text(text + "\n", encoding="utf-8")
+
+    return rows
+
+
 def plot_weekly_series(df_weekly, kgess_values, title_prefix, output_path, countries_label=None):
     fig, ax = plt.subplots(figsize=(14, 6))
 
@@ -2476,6 +2530,11 @@ def run_processing_historical(
         kgess_values=kgess_values_eu,
         title_prefix="Europe",
         output_path=output_dir / "historical_europe_weekly_hydro.png",
+    )
+
+    report_europe_kgess_subperiods(
+        df_weekly_eu=df_weekly_eu,
+        output_path=supplementary_dir / "kgess_subperiods.txt",
     )
 
     # ---------------------------------------------------------
