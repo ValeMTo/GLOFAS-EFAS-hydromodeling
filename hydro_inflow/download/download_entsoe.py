@@ -270,7 +270,7 @@ def download_country_year(
 
 
 def download_entsoe_hydro(
-    years: str = "2015:2019",
+    years: str = "2015:2023",
     token: str | None = None,
     output_dir: Path | None = None,
     sleep_s: float = 0.12,
@@ -349,7 +349,7 @@ def download_entsoe_hydro(
     return output_files
 
 def download_entsoe_italy_zones(
-    years: str = "2015:2019",
+    years: str = "2015:2023",
     token: str | None = None,
     output_dir: Path | None = None,
     sleep_s: float = 0.12,
@@ -414,8 +414,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--years",
-        default="2015:2019",
-        help="Years to download. Example: '2015:2019' or '2019'.",
+        default="2015:2023",
+        help="Years to download. Example: '2015:2023' or '2019'.",
     )
 
     parser.add_argument(

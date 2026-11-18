@@ -46,14 +46,6 @@ year ranking used to pick the climate years for the 2050 scenarios, and compares
 it against EIA capacity factors. `compare_hydro_prod.py` compares modelled and
 observed hydro production for single years.
 
-## Standalone SABER full calibration
-
-`run_glofas_saber_fullcal_standalone.py` produces the FULL-period-calibrated
-GloFAS inflows (`Europe_inflow_<year>_GloFAS_SABER_FULLCAL.nc`) used by the 2050
-scenario runs, bypassing the expanding-window calibration that the pipeline
-applies for historical validation. It overwrites shared SABER intermediates —
-read its docstring before running it.
-
 ---
 
 Recovered from the `prova-claude-code` branch (`3b98b7e308d3f1f5905c708fa60e35775888d2a4`), deleted after this

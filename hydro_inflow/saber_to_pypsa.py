@@ -530,6 +530,14 @@ def run_saber_to_pypsa(cfg: dict | None = None) -> None:
     else:
         years = cfg["pypsa_inflow_years"]
 
+    # Set by the FULLCAL pass of run_hydro_inflow_framework, so its files do not
+    # overwrite the expanding-window ones (e.g. Europe_inflow_2010_GloFAS_SABER_FULLCAL.nc).
+    output_suffix = os.environ.get("SABER_OUTPUT_SUFFIX", "")
+    if output_suffix:
+        stem, ext = os.path.splitext(output_netcdf_template)
+        output_netcdf_template = f"{stem}{output_suffix}{ext}"
+        logger.info("Output file suffix from SABER_OUTPUT_SUFFIX: %s", output_suffix)
+
     rivid_map = read_rivid_map(rivid_map_path)
 
     model_to_plants = build_model_to_plants(rivid_map)

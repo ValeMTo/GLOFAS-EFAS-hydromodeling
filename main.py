@@ -110,8 +110,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--entsoe-years",
-        default="2015:2019",
-        help="ENTSO-E hydro production years to download. Example: '2015:2019', '2019' or '2018,2019'.",
+        default="2015:2023",
+        help="ENTSO-E hydro production years to download. Example: '2015:2023', '2019' or '2018,2019'.",
     )
 
     parser.add_argument(

@@ -217,26 +217,102 @@ def run_step(
         restore_environment_variable("HYDRO_REPO_ROOT", previous_repo_root)
         restore_environment_variable("HYDRO_SCRIPTS_DIR", previous_scripts_dir)
         restore_environment_variable("PYTHONPATH", previous_pythonpath)
-        
-def run_expanding_saber(
-    dataset: str,
-    repo_root: Path,
-    dry_run: bool = False,
-) -> None:
+
+
+def config_years(dataset: str, key: str, env_name: str) -> list[int]:
+    """Years from hydro_config, overridden by a space/comma list in env_name.
+
+    An env_name set to an empty string gives no years, which skips the pass.
+    """
+    env_value = os.environ.get(env_name)
+    if env_value is not None:
+        return [int(y) for y in env_value.replace(",", " ").split()]
 
     from hydro_inflow.hydro_config import get_config
 
     prev_dataset = os.environ.get("HYDRO_DATASET")
     os.environ["HYDRO_DATASET"] = dataset
     try:
-        cfg = get_config()
-        env_years = os.environ.get("SABER_EXPANDING_YEARS")
-        if env_years:
-            inflow_years = [int(y) for y in env_years.replace(",", " ").split()]
-        else:
-            inflow_years = [int(y) for y in cfg["pypsa_inflow_years"]]
+        return [int(y) for y in get_config()[key]]
     finally:
         restore_environment_variable("HYDRO_DATASET", prev_dataset)
+
+
+def run_saber_steps(
+    dataset: str,
+    repo_root: Path,
+    calibration_end: int | None,
+    inflow_years: list[int],
+    output_suffix: str = "",
+) -> None:
+    """Run the four SABER steps with the calibration cutoff and output years
+    passed through SABER_CALIBRATION_END / SABER_INFLOW_YEARS /
+    SABER_OUTPUT_SUFFIX. calibration_end=None calibrates on the full period."""
+    settings = {
+        "SABER_CALIBRATION_END": None if calibration_end is None else str(calibration_end),
+        "SABER_INFLOW_YEARS": " ".join(str(y) for y in inflow_years),
+        "SABER_OUTPUT_SUFFIX": output_suffix or None,
+    }
+    previous = {name: os.environ.get(name) for name in settings}
+
+    for name, value in settings.items():
+        restore_environment_variable(name, value)
+
+    try:
+        for step in EXPANDING_STEPS:
+            run_step(script_name=step, dataset=dataset, repo_root=repo_root)
+    finally:
+        for name, value in previous.items():
+            restore_environment_variable(name, value)
+
+
+def run_fullcal_saber(
+    dataset: str,
+    repo_root: Path,
+    dry_run: bool = False,
+) -> None:
+    """Full-period SABER calibration for the 2050 climate years.
+
+    The 2050 scenarios are projections, not validation, so their inflows use
+    every observed year. Files are written as
+    Europe_inflow_<year>_<DATASET>_SABER_FULLCAL.nc. This pass runs before the
+    expanding-window one, so the shared SABER intermediates end up in the same
+    state as without it.
+    """
+    years = config_years(dataset, "fullcal_inflow_years", "SABER_FULLCAL_YEARS")
+
+    if not years:
+        logger.info("No FULLCAL years selected, skipping the full-period calibration.")
+        return
+
+    logger.info("")
+    logger.info("=" * 90)
+    logger.info("Full-period calibration (FULLCAL) for years: %s", years)
+    logger.info("=" * 90)
+
+    if dry_run:
+        logger.info(
+            "[dry-run] Would run %s without calibration cutoff, "
+            "SABER_INFLOW_YEARS=%s, SABER_OUTPUT_SUFFIX=_FULLCAL",
+            EXPANDING_STEPS, years,
+        )
+        return
+
+    run_saber_steps(
+        dataset=dataset,
+        repo_root=repo_root,
+        calibration_end=None,
+        inflow_years=years,
+        output_suffix="_FULLCAL",
+    )
+
+
+def run_expanding_saber(
+    dataset: str,
+    repo_root: Path,
+    dry_run: bool = False,
+) -> None:
+    inflow_years = config_years(dataset, "pypsa_inflow_years", "SABER_EXPANDING_YEARS")
 
     logger.info("Expanding-window calibration for years: %s", inflow_years)
 
@@ -259,22 +335,12 @@ def run_expanding_saber(
             )
             continue
 
-        prev_cal = os.environ.get("SABER_CALIBRATION_END")
-        prev_inflow = os.environ.get("SABER_INFLOW_YEARS")
-        os.environ["SABER_CALIBRATION_END"] = str(calibration_end)
-        os.environ["SABER_INFLOW_YEARS"] = str(year)
-
-        try:
-            for step in EXPANDING_STEPS:
-                run_step(
-                    script_name=step,
-                    dataset=dataset,
-                    repo_root=repo_root,
-                    dry_run=dry_run,
-                )
-        finally:
-            restore_environment_variable("SABER_CALIBRATION_END", prev_cal)
-            restore_environment_variable("SABER_INFLOW_YEARS", prev_inflow)
+        run_saber_steps(
+            dataset=dataset,
+            repo_root=repo_root,
+            calibration_end=calibration_end,
+            inflow_years=[year],
+        )
 
 
 def restore_environment_variable(name: str, previous_value: str | None) -> None:
@@ -329,6 +395,11 @@ def run_hydro_inflow_framework(
         for step in selected_steps:
             if step in EXPANDING_STEPS:
                 if not expanding_done:
+                    run_fullcal_saber(
+                        dataset=current_dataset,
+                        repo_root=repo_root,
+                        dry_run=dry_run,
+                    )
                     run_expanding_saber(
                         dataset=current_dataset,
                         repo_root=repo_root,

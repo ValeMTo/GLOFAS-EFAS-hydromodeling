@@ -89,6 +89,9 @@ def get_config() -> dict:
         "grand_path": hydro_global_dir / "GRanD_reservoirs_v1_3.shp",
         "pypsa_inflow_netcdf_dir": pypsa_inflow_netcdf_dir,
         "pypsa_inflow_years": [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023],
+        # Climate years of the 2050 multi-year scenarios. Their inflows use the
+        # full-period SABER calibration and are written with a _FULLCAL suffix.
+        "fullcal_inflow_years": [2010, 2011],
 
         "entsoe_hydro_years": [
             2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023,

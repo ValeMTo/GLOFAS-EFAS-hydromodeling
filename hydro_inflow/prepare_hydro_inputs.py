@@ -129,7 +129,7 @@ def prepare_and_check_hydro_inputs(
     *,
     glofas_years: str = "1980:2025",
     efas_years: str = "1992:2025",
-    entsoe_years: str = "2015:2019",
+    entsoe_years: str = "2015:2023",
     electricity_maps_ch_years: str = "2017:2023",
     skip_static: bool = False,
     skip_glofas: bool = False,
