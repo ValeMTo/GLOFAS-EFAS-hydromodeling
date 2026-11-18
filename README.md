@@ -1,751 +1,179 @@
 # GLOFAS-EFAS-hydromodeling
 
-This repository provides a reproducible hydrological preprocessing and PyPSA-Eur workflow based on GloFAS/EFAS-ERA5, GRDC observations, GRanD reservoirs and SABER bias correction.
+Workflow behind the paper *Hydrologically Constrained Hydropower Representation
+in PyPSA-Eur: Implications for European Energy System Planning*
+([doi:10.2139/ssrn.7096701](https://doi.org/10.2139/ssrn.7096701)).
 
-It covers hourly historical validation runs for 2015–2023 and sector-coupled
-2050 scenarios as multi-year climate-variability runs (climate years 2010 and
-2011).
+It turns GloFAS and EFAS river discharge (ERA5-forced) into plant-level hydro
+inflows for PyPSA-Eur. The discharge is bias-corrected with SABER against GRDC
+observations. The workflow then compares the result with the default PyPSA-Eur
+hydro treatment in two settings:
 
-The workflow is organised around a single entry point:
-
-```bash
-python main.py
-```
-
-Running `main.py` executes the complete workflow sequence:
-
-1. prepare hydro input data;
-2. run the GloFAS/EFAS hydro inflow preprocessing framework;
-3. prepare PyPSA-Eur weather cutouts;
-4. run PyPSA-Eur historical and 2050 scenarios;
-5. collect and postprocess the final results.
+- **historical validation**: hourly, electricity-only runs for 2015–2023,
+  checked against ENTSO-E hydro generation;
+- **2050 scenarios**: sector-coupled, multi-year runs over climate years
+  2010 + 2011.
 
 ---
 
-## 1. Clone the repository
+## Workflow at a glance
 
-Clone the repository including submodules:
+`python main.py` runs five steps in sequence:
+
+| Step | What it does | Main output |
+|---|---|---|
+| `prepare-hydro-inputs` | downloads static data, GloFAS/EFAS, ENTSO-E; builds the plant table and the annual hydro reference | `data/hydro_workflow/`, `data/pypsa/` |
+| `run-hydro-inflow` | matches plants to the GloFAS/EFAS drainage network and runs the SABER correction | `data/pypsa/Europe_inflow_<year>_<GloFAS\|EFAS>_SABER[_FULLCAL].nc` |
+| `prepare-cutouts` | builds the PyPSA-Eur weather cutouts | `external/pypsa-eur-hydro/cutouts/` |
+| `run-pypsa-scenarios` | solves the PyPSA-Eur scenarios (below) | `external/pypsa-eur-hydro/results/` |
+| `run-postprocessing` | collects networks and produces figures and tables | `hydro_results/` |
+
+### Scenarios
+
+| Group | Scenarios | Config | Resolution | Cost per run |
+|---|---|---|---|---|
+| historical | `pypsa_`, `glofas_`, `efas_` × 2015–2023 (27 runs) | `config/historical/` | 1 h, electricity only | ~2 h, ~88 GB |
+| 2050 | `pypsa_2050_multiyear`, `glofas_2050_multiyear`, `efas_2050_multiyear` | `config/planning_2050/` | 4 h, sector-coupled | ~11 h, ~400 GB, 32 threads |
+
+`pypsa_*` uses the default PyPSA-Eur hydro inflows. `glofas_*` and `efas_*` use
+the SABER-corrected inflows of the same year.
+
+---
+
+## Setup
+
+### 1. Clone with submodules
 
 ```bash
 git clone --recurse-submodules https://github.com/ValeMTo/GLOFAS-EFAS-hydromodeling.git
 cd GLOFAS-EFAS-hydromodeling
-```
-
-If the repository was already cloned without submodules, initialise them with:
-
-```bash
+# if already cloned without submodules:
 git submodule update --init --recursive
 ```
 
-The main external submodules are:
+Submodules: `external/pypsa-eur-hydro/` (modified PyPSA-Eur) and
+`external/saber-hbc/` (SABER).
 
-```text
-external/pypsa-eur-hydro/
-external/saber-hbc/
-```
-
-`external/pypsa-eur-hydro/` contains the modified PyPSA-Eur workflow used to run the energy-system simulations.
-
-`external/saber-hbc/` contains the SABER package used by the hydrological correction step.
-
----
-
-## 2. Create the conda environment
-
-Create and activate the environment:
+### 2. Environment
 
 ```bash
 conda env create -f environment.yml
 conda activate pypsa-eur-hydro
 ```
 
-The workflow uses Gurobi as optimisation solver for PyPSA-Eur. The conda environment installs the Python interface, but users need a valid Gurobi installation and license.
+PyPSA-Eur is solved with Gurobi, so a valid licence is required. If Gurobi does
+not find it, set `GRB_LICENSE_FILE=/path/to/gurobi.lic`.
 
-If Gurobi does not find the license automatically, set:
+### 3. Credentials
+
+| Source | Needed for | How |
+|---|---|---|
+| Copernicus CDS | GloFAS / EFAS download | `~/.cdsapirc`, and accept the dataset terms on the portal |
+| ENTSO-E Transparency | hourly hydro generation | `export ENTSOE_API_TOKEN=...` |
+| Electricity Maps | Swiss hydro generation (not on ENTSO-E), 2017–2023 | `export EM_TOKEN=...` |
+
+Without a token the corresponding download is skipped. The files are written in
+a format specific to this workflow, so a manual export from the ENTSO-E website
+cannot replace them. An ENTSO-E token is free: register on the Transparency
+Platform and request API access. Then either rerun `prepare-hydro-inputs` or
+call the download script on its own:
 
 ```bash
-export GRB_LICENSE_FILE=/path/to/gurobi.lic
+python -m hydro_inflow.download.download_entsoe --years 2015:2023
 ```
 
-On Windows PowerShell:
+Switzerland is excluded in 2015–2016, which Electricity Maps does not cover.
 
-```powershell
-$env:GRB_LICENSE_FILE="C:\path\to\gurobi.lic"
-```
+### 4. Inputs to obtain manually
+
+These cannot be redistributed or downloaded automatically:
+
+| File | Source |
+|---|---|
+| `data/hydro_workflow/Stations/GRDC_Europe.nc` | GRDC data portal (GRDC terms of use) |
+| `data/hydro_workflow/hydro_global/GRanD_reservoirs_v1_3.shp` | GRanD v1.3, or ask the authors |
+| `data/hydro_workflow/hydro_global/uparea_5.0_cut.nc` | EFAS upstream area, or ask the authors |
+| `data/hydro_workflow/hydro_global/GADM/gadm41_ITA_1.json` | gadm.org, level 1 Italy (used for the IT-North bidding zone) |
 
 ---
 
-## 3. Configure external credentials
-
-### Copernicus / ECMWF API
-
-GloFAS and EFAS data are downloaded through the Copernicus/ECMWF API using `cdsapi`.
-
-Before running the workflow, configure the CDS API credentials in your home directory and accept the required dataset terms of use on the Copernicus portal.
-
-If API access is not available, the corresponding NetCDF files can be provided manually in the expected folders described below.
-
-### ENTSO-E Transparency Platform
-
-Downloading ENTSO-E hydro generation data requires an API token.
-
-On Linux/macOS:
+## Running
 
 ```bash
-export ENTSOE_API_TOKEN="<your-entsoe-token>"
+python main.py --dry-run          # print the full plan, run nothing
+python main.py                    # full workflow
 ```
 
-On Windows PowerShell:
-
-```powershell
-$env:ENTSOE_API_TOKEN="<your-entsoe-token>"
-```
-
-If the token is not available, the workflow skips the ENTSO-E download step. In that case, the hourly ENTSO-E CSV files must be placed manually in:
-
-data/hydro_workflow/hydro_global/ENTSOE/Production/
-
-Expected files are:
-
-Europe_Hydro_2015.csv
-Europe_Hydro_2016.csv
-...
-Europe_Hydro_2023.csv
-
-These hourly files are used to build the annual no-pumped hydro production reference:
-
-data/hydro_workflow/hydro_global/ENTSOE/hydro_annual_production.csv
-### Electricity Maps (Switzerland)
-
-Swiss hydro generation is not published on the ENTSO-E Transparency Platform, so
-it is taken from Electricity Maps instead. Downloading it requires a token:
+Partial runs use `--from-step` / `--to-step`:
 
 ```bash
-export EM_TOKEN="<your-electricity-maps-token>"
-```
-
-The workflow then fetches 2017–2023 automatically into
-`data/hydro_workflow/hydro_global/ENTSOE/ElectricityMaps/`. Without the token the
-step is skipped and the files must be placed there by hand, named
-`CH_<year>_electricity_maps.json`.
-
-During the annual reference build Switzerland is replaced with the Electricity
-Maps total for every year a file is available. 2015 and 2016 are not covered, so
-Switzerland is excluded from those two years.
-
----
-
-## 4. Data folders
-
-By default, hydro input and intermediate data are stored under:
-
-```text
-data/hydro_workflow/
-```
-
-PyPSA-ready hydro inputs are stored under:
-
-```text
-data/pypsa/
-```
-
-The main hydro workflow uses:
-
-```text
-data/hydro_workflow/hydro_global/
-data/hydro_workflow/saber_global/
-```
-
-`hydro_global/` contains common static and observational input data, including plant data, HydroBASINS, GRanD, GRDC and ENTSO-E inputs.
-
-`saber_global/` contains intermediate GloFAS/EFAS matching and SABER correction outputs.
-
-Postprocessed PyPSA outputs are written locally to:
-
-```text
-hydro_results/
-```
-
----
-
-## 5. Run the complete workflow
-
-From the repository root, run:
-
-```bash
-python main.py
-```
-
-This executes the full sequence:
-
-```text
-prepare-hydro-inputs
-run-hydro-inflow
-prepare-cutouts
-run-pypsa-scenarios
-run-postprocessing
-```
-
-To check the full sequence without executing expensive operations:
-
-```bash
-python main.py --dry-run
-```
-
-The dry-run prints the complete planned workflow, including hydro preprocessing functions, PyPSA-Eur Snakemake commands and postprocessing collection targets.
-
----
-
-## 6. Main workflow options
-
-The workflow is controlled from `main.py`.
-
-Useful options include:
-
-```bash
-python main.py --dry-run
-python main.py --verbose
-```
-
-To run only part of the workflow during development or after an interrupted run:
-
-```bash
-python main.py --from-step run-hydro-inflow
-python main.py --from-step prepare-cutouts
+# hydro inflows only
+python main.py --from-step prepare-hydro-inputs --to-step run-hydro-inflow
+# PyPSA only, inflows already available
+python main.py --from-step prepare-cutouts --to-step run-pypsa-scenarios --pypsa-group historical   # or 2050, all
+# a single scenario (an existing target network is skipped unless --pypsa-force is given)
+python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-only glofas_2019
+# postprocessing only
 python main.py --from-step run-postprocessing --to-step run-postprocessing
 ```
 
-Available step names are:
+Other useful options:
+- `--hydro-dataset glofas|efas|all`;
+- `--pypsa-snakemake-dryrun`;
+- `--verbose`.
 
-```text
-prepare-hydro-inputs
-run-hydro-inflow
-prepare-cutouts
-run-pypsa-scenarios
-run-postprocessing
-```
+The full list is in `python main.py --help`.
 
-Hydro dataset selection:
-
-```bash
-python main.py --hydro-dataset glofas
-python main.py --hydro-dataset efas
-python main.py --hydro-dataset all
-```
-
-PyPSA scenario group selection:
-
-```bash
-python main.py --pypsa-group historical
-python main.py --pypsa-group 2050
-python main.py --pypsa-group all
-```
-
-Run only one PyPSA scenario or cutout:
-
-```bash
-python main.py --from-step prepare-cutouts --to-step prepare-cutouts --pypsa-only cutout_2019
-python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-only glofas_2019
-```
-
-Use a Snakemake dry-run inside the PyPSA-Eur workflow:
-
-```bash
-python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-snakemake-dryrun
-```
-
-Electricity Maps download control:
-
-```bash
-python main.py --electricity-maps-ch-years 2017:2023
-python main.py --electricity-maps-ch-years 2020,2021
-python main.py --skip-electricity-maps
-```
+Scenario configs are passed to Snakemake with `--configfile`, so
+`external/pypsa-eur-hydro/config/config.yaml` is never modified.
 
 ---
 
-## 7. Hydro input preparation
-
-The first workflow step prepares hydro inputs:
-
-```text
-prepare-hydro-inputs
-```
-
-It performs the following tasks:
-
-* downloads `GloHydroRes_vs1.csv` from Zenodo into `data/pypsa/`;
-* builds the PyPSA-ready hydropower plant table;
-* downloads the GloFAS upstream-area file;
-* downloads and extracts HydroBASINS Europe;
-* downloads GloFAS data through the Copernicus/ECMWF API;
-* downloads and processes EFAS data through the Copernicus/ECMWF API;
-* downloads ENTSO-E hourly hydro production data if `ENTSOE_API_TOKEN` is set;
-* downloads ENTSO-E hourly hydro production for the Italian "North" bidding zone (IT_North) if `ENTSOE_API_TOKEN` is set;
-* builds the annual ENTSO-E/Electricity Maps hydro production reference when the required inputs are available.
-
-The annual hydro production reference is written to:
-
-```text
-data/hydro_workflow/hydro_global/ENTSOE/hydro_annual_production.csv
-```
-
-This file is used by the modified PyPSA-Eur `build_hydro_profile.py` workflow.
-
----
-
-## 8. Manual input files
-
-Some files cannot be automatically redistributed or downloaded by this repository. They must be obtained by the user or requested from the authors.
-
-### GRDC river discharge observations
-
-Expected path:
-
-```text
-data/hydro_workflow/Stations/GRDC_Europe.nc
-```
-
-GRDC data must be obtained from the GRDC data portal and are subject to GRDC terms of use.
-
-### GRanD reservoir data
-
-Expected path:
-
-```text
-data/hydro_workflow/hydro_global/GRanD_reservoirs_v1_3.shp
-```
-
-The workflow was prepared using GRanD reservoir data version 1.3. If the exact file cannot be retrieved, please request the original input from the authors.
-
-### EFAS upstream-area auxiliary data
-
-Expected path:
-
-```text
-data/hydro_workflow/hydro_global/uparea_5.0_cut.nc
-```
-
-This auxiliary file is required for the EFAS drainage workflow.
-
-### Electricity Maps Switzerland data
-
-Expected directory:
-
-```text
-data/hydro_workflow/hydro_global/ENTSOE/ElectricityMaps/
-```
-
-Expected files:
-
-```text
-CH_2017_electricity_maps.json
-...
-CH_2023_electricity_maps.json
-```
-
-These are downloaded automatically when `EM_TOKEN` is set (see section 3); they
-replace the Swiss hydro generation values in the annual production reference.
-
-### GADM administrative boundaries (Italy)
-
-Expected path:
-
-data/hydro_workflow/hydro_global/GADM/gadm41_ITA_1.json
-
-GADM level-1 administrative boundaries for Italy are used by the historical
-postprocessing (`processing_historical.py`) to build the Italian "North"
-bidding-zone polygon. The file must be downloaded from the GADM portal
-(https://gadm.org) and is subject to GADM terms of use.
-
----
-
-## 9. Hydro inflow framework
-
-The second workflow step runs the hydrological preprocessing framework:
-
-```text
-run-hydro-inflow
-```
-
-By default, both datasets are processed sequentially:
-
-```text
-glofas
-efas
-```
-
-The GloFAS sequence is:
-
-```text
-glofas_to_drainage_network.py
-extract_glofas_series_for_hydro_plants.py
-grdc_to_drain_glofas.py
-GRanD_to_drain.py
-saber_preprocessing.py
-write_saber_config.py
-run_saber.py
-saber_to_pypsa.py
-```
-
-The EFAS sequence is:
-
-```text
-efas_to_drainage_network.py
-extract_efas_series_for_hydro_plants.py
-grdc_to_drain_efas.py
-GRanD_to_drain.py
-saber_preprocessing.py
-write_saber_config.py
-run_saber.py
-saber_to_pypsa.py
-```
-
-The workflow is implemented as importable Python functions inside:
-
-```text
-hydro_inflow/
-```
-
-The final PyPSA-ready files are written to:
-
-```text
-data/pypsa/
-```
-
-Examples:
-
-```text
-data/pypsa/Europe_inflow_2015_GloFAS_SABER.nc
-data/pypsa/Europe_inflow_2015_EFAS_SABER.nc
-data/pypsa/Europe_inflow_2019_GloFAS_SABER.nc
-data/pypsa/Europe_inflow_2019_EFAS_SABER.nc
-```
-
-### Expanding-window (causal) calibration
-
-The last four steps are not run once over the whole period. They are repeated
-for every inflow year, each time calibrating SABER only on the years strictly
-before it:
-
-```text
-saber_preprocessing.py
-write_saber_config.py
-run_saber.py
-saber_to_pypsa.py
-```
-
-For year *Y* the framework sets `SABER_CALIBRATION_END=Y-1` and
-`SABER_INFLOW_YEARS=Y`, so the 2019 inflows are corrected with coefficients
-fitted on 2015-2018 alone. No observation from the target year, or after it,
-ever reaches its own bias correction. This is what makes the historical
-comparison against ENTSO-E a genuine out-of-sample validation rather than a
-fit.
-
-The set of years comes from `pypsa_inflow_years` in `hydro_inflow/hydro_config.py`,
-and can be overridden for a partial re-run:
-
-```bash
-SABER_EXPANDING_YEARS="2020 2021" python main.py --from-step run-hydro-inflow --to-step run-hydro-inflow
-```
-
-The 2050 scenarios need the opposite choice. There is no observation to be
-honest about in a future projection, so throwing away most of the record would
-only add noise; they use inflows calibrated on the full period instead, written
-as `Europe_inflow_<year>_<DATASET>_SABER_FULLCAL.nc` by
-`analysis/run_glofas_saber_fullcal_standalone.py`. That script overwrites the
-shared SABER intermediates, so back them up first and restore them before the
-next historical run.
-
-Diagnostic plots are disabled by default. They can be enabled with:
-
-```bash
-HYDRO_MAKE_DIAGNOSTIC_PLOTS=1 python main.py --from-step run-hydro-inflow --to-step run-hydro-inflow
-```
-
----
-
-## 10. PyPSA-Eur cutouts and scenarios
-
-The third and fourth workflow steps run the modified PyPSA-Eur workflow:
-
-```text
-prepare-cutouts
-run-pypsa-scenarios
-```
-
-The modified PyPSA-Eur repository is included as a submodule:
-
-```text
-external/pypsa-eur-hydro/
-```
-
-Scenario-specific configs are stored in:
-
-```text
-config/historical/
-config/planning_2050/
-config/cutouts/
-```
-
-During a run, the wrapper copies the selected config into:
-
-```text
-external/pypsa-eur-hydro/config/config.yaml
-```
-
-and then launches the appropriate Snakemake target inside:
-
-```text
-external/pypsa-eur-hydro/
-```
-
-Historical simulations are electricity-only runs at hourly resolution
-(`resolution_elec: 1h`) covering 2015–2023, so 27 networks in all:
-
-```text
-pypsa_2015 ... pypsa_2023
-glofas_2015 ... glofas_2023
-efas_2015 ... efas_2023
-```
-
-Each of them takes roughly 2 hours and peaks near 88 GB.
-
-The 2050 sector-coupled scenarios are multi-year runs at 4-hour resolution
-(`resolution_sector: 4h`). They replace the earlier single-climate-year (2019)
-scenarios, which were removed:
-
-```text
-pypsa_2050_multiyear  glofas_2050_multiyear  efas_2050_multiyear   two climate years (2010 + 2011)
-```
-
-The multi-year scenarios optimise a single investment decision across two
-contrasting climate years, following PyPSA-Eur PR #1613: `snapshots.start/end`
-and `atlite.default_cutout` are lists rather than single values. They need
-32 solver threads and about 400 GB, and take some 11 hours each.
-
-Because their results span two years, every extensive quantity must be divided
-by `nyears` before being compared with a single-year run. The postprocessing
-does this; a manual comparison must not skip it.
-
-The multi-year scenarios draw their inflows from the FULL-period SABER
-calibration (`inflow_variant: FULLCAL`) rather than the expanding-window one,
-which is the appropriate choice for scenario work as opposed to validation.
-
-Expected historical network outputs include:
-
-```text
-external/pypsa-eur-hydro/results/Europe_2015/networks/base_s_100_elec_.nc
-external/pypsa-eur-hydro/results/Europe_2015_GloFAS_SABER/networks/base_s_100_elec_.nc
-external/pypsa-eur-hydro/results/Europe_2015_EFAS_SABER/networks/base_s_100_elec_.nc
-```
-
-Expected 2050 network outputs include:
-
-```text
-external/pypsa-eur-hydro/results/PyPSA_Europe_2050_MultiYear/networks/base_s_100___2050.nc
-external/pypsa-eur-hydro/results/GloFAS_Europe_2050_MultiYear/networks/base_s_100___2050.nc
-external/pypsa-eur-hydro/results/EFAS_Europe_2050_MultiYear/networks/base_s_100___2050.nc
-```
-
-The postprocessing copies them into `hydro_results/<scenario>_2050/` and stops
-with an error if one of them is missing.
-
-Hydro inflow selection is inferred from the scenario name:
-
-* GloFAS scenarios use `data/pypsa/Europe_inflow_<year>_GloFAS_SABER.nc`;
-* EFAS scenarios use `data/pypsa/Europe_inflow_<year>_EFAS_SABER.nc`;
-* baseline PyPSA scenarios use the default PyPSA hydro treatment.
-
-With `inflow_variant: FULLCAL` the `_FULLCAL` files are used instead.
-
-Reservoirs are kept as individual units. `GloFAS_ERA5.reservoir_subclustering`
-groups them within each bus and must stay `false`: with it on, the GloFAS and
-EFAS runs carry 356 aggregated reservoirs against the baseline's 1078, and the
-three scenarios are no longer comparable.
-
----
-
-## 11. Postprocessing
-
-The final workflow step is:
-
-```text
-run-postprocessing
-```
-
-It collects selected PyPSA-Eur results and intermediate files into:
-
-```text
-hydro_results/
-```
-
-Then it runs the postprocessing modules stored in:
-
-```text
-postprocessing_workflow/
-```
-
-The postprocessing modules are:
-
-```text
-postprocessing_workflow/processing_historical.py
-postprocessing_workflow/processing_2050.py
-postprocessing_workflow/processing_hydro_representation.py
-```
-
-The expected local output folders include:
-
-```text
-hydro_results/PyPSA_2015/ ... hydro_results/PyPSA_2023/
-hydro_results/GloFAS-SABER_2015/ ... hydro_results/GloFAS-SABER_2023/
-hydro_results/EFAS-SABER_2015/ ... hydro_results/EFAS-SABER_2023/
-hydro_results/PyPSA_2050/
-hydro_results/GloFAS-SABER_2050/
-hydro_results/EFAS-SABER_2050/
-hydro_results/images/
-```
-
-`hydro_results/` is a generated local output directory and is ignored by Git.
-
-A postprocessing-only dry-run can be launched with:
-
-```bash
-python main.py --from-step run-postprocessing --to-step run-postprocessing --dry-run
-```
-
-The two processing modules can also be called directly, which is convenient
-when only the figures need regenerating. `processing_historical.py` takes the
-range of years to process:
+## Outputs
+
+| Where | What |
+|---|---|
+| `data/pypsa/Europe_inflow_<year>_<DATASET>_SABER.nc` | corrected inflows, historical (expanding-window calibration) |
+| `data/pypsa/Europe_inflow_<year>_<DATASET>_SABER_FULLCAL.nc` | corrected inflows, full-period calibration, used by the 2050 runs |
+| `hydro_results/<Scenario>_<year>/`, `hydro_results/<Scenario>_2050/` | collected PyPSA networks |
+| `hydro_results/images/` | paper figures |
+| `hydro_results/images/historical/supplementary/` | supplementary tables (LaTeX) and figures |
+
+The figures can be regenerated without rerunning anything:
 
 ```bash
 python -m postprocessing_workflow.processing_historical --hydro-results hydro_results --years 2015:2023
 python -m postprocessing_workflow.processing_2050 --hydro-results hydro_results
 ```
 
-Both accept `--output-dir`, so an alternative set of figures can be written
-somewhere else without touching the published ones.
-
-Besides the main figures, the historical module writes to
-`hydro_results/images/historical/supplementary/`:
-
-```text
-table_s1_kgess.txt              KGESS per country, with the installed RoR/reservoir split
-table_s2_kge_components.txt     the r, beta and gamma decomposition
-kge_components_country_map.png  the same decomposition as 3x3 maps
-weekly_comparison_group*.png    weekly series, four countries per panel
-```
-
-The two tables are ready-to-include LaTeX.
+Both accept `--output-dir`.
 
 ---
 
-## 12. Repository structure
+## Notes for interpreting the results
 
-Main entry point:
-
-```text
-main.py
-```
-
-Hydro preprocessing package:
-
-```text
-hydro_inflow/
-```
-
-PyPSA wrapper package:
-
-```text
-pypsa_workflow/
-```
-
-Postprocessing wrapper and analysis scripts:
-
-```text
-postprocessing_workflow/
-```
-
-One-off analyses, kept for reference and deliberately outside the pipeline
-(run-of-river and reservoir audits, SABER leave-one-out, the hydrological year
-index, the standalone FULL-period SABER calibration). Each script writes into
-its own `*_out/` directory beside it; see `analysis/README.md`:
-
-```text
-analysis/
-```
-
-Scenario and cutout configuration files:
-
-```text
-config/historical/
-config/planning_2050/
-config/cutouts/
-```
-
-External submodules:
-
-```text
-external/pypsa-eur-hydro/
-external/saber-hbc/
-```
-
-Generated local data and outputs:
-
-```text
-data/hydro_workflow/
-data/pypsa/
-hydro_results/
-```
-
-These generated folders are not intended to be committed to the repository.
+- **Multi-year 2050 networks** cover two climate years. Before comparing them
+  with a single-year run, divide extensive quantities (energy, costs, emissions)
+  by `nyears`. The postprocessing already does this.
+- **Two SABER calibrations.** Historical inflows use an expanding window (year
+  *Y* is corrected with coefficients fitted on years before *Y* only), so the
+  comparison with ENTSO-E is out of sample. The 2050 climate years (2010, 2011)
+  use the full observed period and are written with the `_FULLCAL` suffix.
+- **Reservoirs** stay as individual units
+  (`GloFAS_ERA5.reservoir_subclustering: false`). Turning aggregation on makes
+  the GloFAS/EFAS runs incomparable with the baseline.
 
 ---
 
-## 13. Typical commands
+## Repository layout
 
-Full dry-run:
-
-```bash
-python main.py --dry-run
-```
-
-Full workflow:
-
-```bash
-python main.py
-```
-
-Run only the hydro preprocessing framework:
-
-```bash
-python main.py --from-step prepare-hydro-inputs --to-step run-hydro-inflow
-```
-
-Run only PyPSA-Eur scenarios after hydro inflows are already available:
-
-```bash
-python main.py --from-step prepare-cutouts --to-step run-pypsa-scenarios
-```
-
-Run only postprocessing after PyPSA-Eur outputs are already available:
-
-```bash
-python main.py --from-step run-postprocessing --to-step run-postprocessing
-```
-
-Run only one PyPSA scenario:
-
-```bash
-python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-only glofas_2019
-python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-only glofas_2050_multiyear
-```
-
-Note that the wrapper skips a scenario whose target network already exists. To
-force a re-run, move the existing `.nc` out of the way first.
-
-Run a Snakemake dry-run for PyPSA scenarios:
-
-```bash
-python main.py --from-step run-pypsa-scenarios --to-step run-pypsa-scenarios --pypsa-snakemake-dryrun
+```text
+main.py                     single entry point
+hydro_inflow/               hydro preprocessing and SABER correction
+pypsa_workflow/             PyPSA-Eur wrapper (cutouts, scenarios)
+postprocessing_workflow/    collection, figures, tables
+analysis/                   one-off analyses outside the pipeline (see analysis/README.md)
+config/                     historical/, planning_2050/, cutouts/
+external/                   pypsa-eur-hydro, saber-hbc (submodules)
+data/, hydro_results/       generated, not tracked by git
 ```
