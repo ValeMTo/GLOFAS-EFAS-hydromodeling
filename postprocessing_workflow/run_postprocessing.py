@@ -51,21 +51,18 @@ SCENARIOS_2050 = {
         "target_dir": "PyPSA_2050",
         "source_candidates": [
             "PyPSA_Europe_2050_MultiYear",
-            "PyPSA_Europe_2050",
         ],
     },
     "glofas_saber": {
         "target_dir": "GloFAS-SABER_2050",
         "source_candidates": [
             "GloFAS_Europe_2050_MultiYear",
-            "GloFAS_Europe_2050",
         ],
     },
     "efas_saber": {
         "target_dir": "EFAS-SABER_2050",
         "source_candidates": [
             "EFAS_Europe_2050_MultiYear",
-            "EFAS_Europe_2050",
         ],
     },
 }

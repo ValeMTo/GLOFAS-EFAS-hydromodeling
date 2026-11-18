@@ -3,8 +3,8 @@
 This repository provides a reproducible hydrological preprocessing and PyPSA-Eur workflow based on GloFAS/EFAS-ERA5, GRDC observations, GRanD reservoirs and SABER bias correction.
 
 It covers hourly historical validation runs for 2015–2023 and sector-coupled
-2050 scenarios, both as single climate years and as multi-year
-climate-variability runs.
+2050 scenarios as multi-year climate-variability runs (climate years 2010 and
+2011).
 
 The workflow is organised around a single entry point:
 
@@ -511,11 +511,11 @@ efas_2015 ... efas_2023
 
 Each of them takes roughly 2 hours and peaks near 88 GB.
 
-The 2050 sector-coupled scenarios come in two flavours, both at 4-hour
-resolution (`resolution_sector: 4h`):
+The 2050 sector-coupled scenarios are multi-year runs at 4-hour resolution
+(`resolution_sector: 4h`). They replace the earlier single-climate-year (2019)
+scenarios, which were removed:
 
 ```text
-pypsa_2050            glofas_2050            efas_2050             single climate year (2019)
 pypsa_2050_multiyear  glofas_2050_multiyear  efas_2050_multiyear   two climate years (2010 + 2011)
 ```
 
@@ -543,13 +543,13 @@ external/pypsa-eur-hydro/results/Europe_2015_EFAS_SABER/networks/base_s_100_elec
 Expected 2050 network outputs include:
 
 ```text
-external/pypsa-eur-hydro/results/PyPSA_Europe_2050/networks/base_s_100___2050.nc
-external/pypsa-eur-hydro/results/GloFAS_Europe_2050/networks/base_s_100___2050.nc
-external/pypsa-eur-hydro/results/EFAS_Europe_2050/networks/base_s_100___2050.nc
 external/pypsa-eur-hydro/results/PyPSA_Europe_2050_MultiYear/networks/base_s_100___2050.nc
 external/pypsa-eur-hydro/results/GloFAS_Europe_2050_MultiYear/networks/base_s_100___2050.nc
 external/pypsa-eur-hydro/results/EFAS_Europe_2050_MultiYear/networks/base_s_100___2050.nc
 ```
+
+The postprocessing copies them into `hydro_results/<scenario>_2050/` and stops
+with an error if one of them is missing.
 
 Hydro inflow selection is inferred from the scenario name:
 
